@@ -44,9 +44,11 @@ export class KimiProvider implements AgentProvider {
           sessionId: config.resumeSessionId,
           model: process.env.KIMI_MODEL,
           yoloMode: true,
+          groupFolder: config.groupFolder,
           toolDefs,
         }),
         KIMI_INITIAL_PROMPT: config.initialPrompt,
+        OCTO_INTERNAL_API: `http://localhost:${process.env.INTERNAL_PORT || 9800}`,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -106,17 +108,28 @@ const readline = require("readline");
 
 const config = JSON.parse(process.env.KIMI_SESSION_CONFIG);
 const initialPrompt = process.env.KIMI_INITIAL_PROMPT;
+const INTERNAL_API = process.env.OCTO_INTERNAL_API;
 
 function emit(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 
-// Build ExternalTool objects directly (skip createExternalTool which requires Zod)
+// Tool handler: forward to main process via /internal/tool-call
+async function callTool(toolName, params) {
+  const res = await fetch(INTERNAL_API + "/internal/tool-call", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ toolName, groupFolder: config.groupFolder, args: params }),
+  });
+  const result = await res.json();
+  if (result.error) return { output: result.error, message: result.error };
+  const text = (result.content || []).map(c => c.text).join("\\n");
+  return { output: text, message: text };
+}
+
 const externalTools = (config.toolDefs || []).map(t => ({
   name: t.name,
   description: t.description,
   parameters: t.parameters,
-  handler: async (params) => {
-    return { output: JSON.stringify(params), message: "executed" };
-  },
+  handler: async (params) => callTool(t.name, params),
 }));
 
 const session = createSession({

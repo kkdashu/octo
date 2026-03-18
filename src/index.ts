@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { initDatabase, insertMessage, registerGroup, getGroupByJid, listGroups } from "./db";
+import { initDatabase, insertMessage, registerGroup, getGroupByJid, getGroupByFolder, listGroups } from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
@@ -11,6 +11,7 @@ import { KimiProvider } from "./providers/kimi";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
+import { createGroupToolDefs, type MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "main";
@@ -211,6 +212,32 @@ Bun.serve({
       POST: async () => {
         const chats = await channelManager.refreshGroupMetadata();
         return Response.json({ count: chats.length });
+      },
+    },
+    "/internal/tool-call": {
+      POST: async (req: Request) => {
+        const { toolName, groupFolder, args } = (await req.json()) as {
+          toolName: string;
+          groupFolder: string;
+          args: Record<string, unknown>;
+        };
+        const group = getGroupByFolder(db, groupFolder);
+        const isMain = group?.is_main === 1;
+        const sender: MessageSender = {
+          send: (chatJid, text) => channelManager.send(chatJid, text),
+          sendImage: (chatJid, filePath) => channelManager.sendImage(chatJid, filePath),
+          refreshGroupMetadata: async () => {
+            const chats = await channelManager.refreshGroupMetadata();
+            return { count: chats.length };
+          },
+        };
+        const tools = createGroupToolDefs(groupFolder, isMain, db, sender);
+        const tool = tools.find((t) => t.name === toolName);
+        if (!tool) {
+          return Response.json({ error: `Tool not found: ${toolName}` }, { status: 404 });
+        }
+        const result = await tool.handler(args);
+        return Response.json(result);
       },
     },
   },
