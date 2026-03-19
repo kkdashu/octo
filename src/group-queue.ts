@@ -142,6 +142,10 @@ export class GroupQueue {
                 saveSessionId(this.db, groupFolder, event.sessionId);
                 log.info(TAG, `Session ID saved for group ${groupFolder}: ${event.sessionId}`);
               }
+              // Close the session after each turn to release the concurrency slot.
+              // The session ID is persisted above so it can be resumed on the next message.
+              session.close();
+              log.info(TAG, `Session closed after turn completion for ${groupFolder}`);
             } else if (event.type === "error") {
               log.error(TAG, `Agent error for group ${groupFolder}`, event.error);
             }
