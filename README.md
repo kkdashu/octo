@@ -1,83 +1,96 @@
 # Octo
 
-多群组 AI Agent 编排系统 — 连接即时通讯平台与多种 AI 后端，让每个群组拥有独立的智能助手。
+多群组 AI Agent 编排系统。现在底层统一只使用 Claude Agent SDK，群组间通过 `agent_provider` 选择不同的模型线路 profile，而不是切换不同 SDK。
 
 ## 特性
 
-- **多 Provider 架构** — 同时支持 Claude、Codex、Kimi 三种 AI 引擎，每个群组可独立切换，统一的 Provider 接口让新增后端只需一个文件
-- **多群组隔离** — 每个群组独立工作目录、独立会话、独立技能配置，互不干扰
-- **统一工具系统** — 消息发送、图片发送、定时任务、技能安装等工具，一份代码所有 Provider 共用
-- **即时通讯集成** — 飞书原生支持（Webhook + WebSocket），Channel 抽象可扩展到 Slack、Discord 等
-- **定时任务** — 基于 cron 表达式的任务调度，支持隔离和共享上下文两种模式
-- **技能市场** — 系统技能自动同步，可选技能按需安装，跨 Provider 兼容
-- **会话恢复** — Agent 会话自动持久化，重启后可继续对话
+- 统一 runtime：所有群组都走 `ClaudeProvider`
+- 多 profile 路由：`claude`、`codex`、`kimi`、`kimi-cli`
+- 多群隔离：独立工作目录、独立 session、独立技能
+- 统一工具：全部通过 Claude SDK 进程内 MCP 接入
+- 会话恢复：群组切换 profile 不再清 session
+- 定时任务与技能安装：沿用现有工具体系
 
 ## 架构
 
+```text
+飞书群消息
+  → Channel / Router
+    → GroupQueue
+      → resolveAgentProfile(group.agent_provider)
+      → ClaudeProvider
+        → Claude Agent SDK
+          → Anthropic 直连
+          或
+          → 本地 OpenAI 兼容 proxy
+            → OpenAI / Moonshot / 其他 OpenAI 兼容上游
 ```
-飞书群消息 → Channel → Router → GroupQueue → Provider → AI Agent
-                                                ├── Claude (claude-agent-sdk)
-                                                ├── Codex  (@openai/codex-sdk)
-                                                └── Kimi   (kimi-agent-sdk)
-```
-
-Provider 返回统一的事件流（`text` / `result` / `error`），上层完全不感知底层 SDK 差异。
 
 ## 快速开始
 
 ```bash
-# 安装依赖
 bun install
-
-# 配置环境变量
 cp env.example .env
-# 编辑 .env 填入飞书应用凭证和 API Key
+# 编辑 .env，填入飞书凭证和各线路 API Key
 
-# 启动
 bun run start
 ```
 
-## 切换 AI 引擎
+默认会读取：
 
-在主群对 Octo 说：
+1. `AGENT_PROFILES_PATH` 指向的配置文件
+2. 若未设置，则尝试 `config/agent-profiles.json`
+3. 若仍不存在，则回退到 `config/agent-profiles.example.json`
 
-> "把 xxx 群组切换到 codex"
+## 切换线路
 
-或直接操作数据库：
+在主群里使用：
+
+- `list_profiles`：查看当前可用 profile
+- `switch_provider`：把目标群切到指定 profile
+
+或直接修改数据库：
 
 ```bash
-sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi' WHERE folder = 'xxx';"
+sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-cli' WHERE folder = 'xxx';"
 ```
 
-## 添加新 Provider
+这里的 `agent_provider` 现在表示 profile key，不再表示底层 SDK 类型。
 
-1. 创建 `src/providers/xxx.ts`，实现 `AgentProvider` 接口
-2. 在 `src/index.ts` 中注册 `providers.register(new XxxProvider())`
-3. 群组设置 `agent_provider = 'xxx'` 即可使用
+## 配置文件
 
-```typescript
-interface AgentProvider {
-  readonly name: string
-  startSession(config: SessionConfig): Promise<{
-    session: AgentSession       // push() / close()
-    events: AsyncIterable<AgentEvent>  // text / result / error
-  }>
+示例见 [config/agent-profiles.example.json](/Users/wmeng/work/kkdashu/octo/config/agent-profiles.example.json)。
+
+```json
+{
+  "defaultProfile": "claude",
+  "profiles": {
+    "claude": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "model": "claude-sonnet-4-6"
+    },
+    "codex": {
+      "apiFormat": "openai",
+      "upstreamApi": "responses",
+      "baseUrl": "https://api.openai.com",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "model": "gpt-5.4"
+    }
+  }
 }
 ```
 
 ## 技术栈
 
-- **Runtime**: Bun
-- **Database**: SQLite (bun:sqlite)
-- **AI SDKs**: Claude Agent SDK, Codex SDK, Kimi Agent SDK
-- **IM**: 飞书 (Lark)
-- **Protocol**: MCP (Model Context Protocol)
+- Runtime: Bun
+- Database: SQLite (`bun:sqlite`)
+- Agent runtime: `@anthropic-ai/claude-agent-sdk`
+- IM: 飞书
+- Validation: `zod`
 
 ## 文档
 
-- [项目详细文档](docs/octo.md)
-- [多 Provider 架构设计](docs/multi-agent-provider.md)
-
-## License
-
-MIT
+- [项目文档](/Users/wmeng/work/kkdashu/octo/docs/octo.md)
+- [统一运行时说明](/Users/wmeng/work/kkdashu/octo/docs/multi-agent-provider.md)

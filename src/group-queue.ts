@@ -1,7 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
 import type { ChannelManager } from "./channels/manager";
-import type { ProviderRegistry } from "./providers/registry";
+import { resolveAgentProfile } from "./runtime/profile-config";
+import { ClaudeProvider } from "./providers/claude";
 import type { AgentSession } from "./providers/types";
 import { getGroupByFolder, getSessionId, saveSessionId } from "./db";
 import { createGroupToolDefs } from "./tools";
@@ -17,17 +18,17 @@ export class GroupQueue {
   private concurrencyLimit: number;
   private db: Database;
   private channelManager: ChannelManager;
-  private providers: ProviderRegistry;
+  private provider: ClaudeProvider;
 
   constructor(
     db: Database,
     channelManager: ChannelManager,
-    providers: ProviderRegistry,
+    provider: ClaudeProvider,
     concurrencyLimit = 3,
   ) {
     this.db = db;
     this.channelManager = channelManager;
-    this.providers = providers;
+    this.provider = provider;
     this.concurrencyLimit = concurrencyLimit;
     log.info(TAG, `GroupQueue initialized`, { concurrencyLimit });
   }
@@ -99,10 +100,14 @@ export class GroupQueue {
       if (!group) throw new Error(`Group not found: ${groupFolder}`);
 
       const isMain = group.is_main === 1;
-      const providerName = (group as any).agent_provider ?? "claude";
-      const provider = this.providers.get(providerName) ?? this.providers.getDefault();
+      const requestedProfileKey = group.agent_provider || "claude";
+      const profile = resolveAgentProfile(requestedProfileKey);
 
-      log.info(TAG, `Using provider "${provider.name}" for group ${groupFolder}`);
+      log.info(TAG, `Using profile "${profile.profileKey}" for group ${groupFolder}`, {
+        requestedProfileKey,
+        apiFormat: profile.apiFormat,
+        model: profile.model,
+      });
 
       const messageSender: MessageSender = {
         send: (chatJid, text) => this.channelManager.send(chatJid, text),
@@ -115,13 +120,14 @@ export class GroupQueue {
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
       const sessionId = getSessionId(this.db, groupFolder);
 
-      const { session, events } = await provider.startSession({
+      const { session, events } = await this.provider.startSession({
         groupFolder,
         workingDirectory: resolve("groups", groupFolder),
         initialPrompt,
         isMain,
         resumeSessionId: sessionId ?? undefined,
         tools,
+        profile,
       });
 
       this.activeSessions.set(groupFolder, session);

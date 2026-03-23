@@ -1,17 +1,14 @@
-import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { initDatabase, insertMessage, registerGroup, getGroupByJid, getGroupByFolder, listGroups } from "./db";
+import { initDatabase, insertMessage, registerGroup, getGroupByJid, listGroups } from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
-import { ProviderRegistry } from "./providers/registry";
 import { ClaudeProvider } from "./providers/claude";
-import { CodexProvider } from "./providers/codex";
-import { KimiProvider } from "./providers/kimi";
+import { OpenAIProxyManager } from "./runtime/openai-proxy";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
-import { createGroupToolDefs, type MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "main";
@@ -68,29 +65,7 @@ function syncSystemSkills(folder: string) {
 function setupGroup(folder: string, isMain: boolean) {
   mkdirSync(`groups/${folder}`, { recursive: true });
   ensureClaudeMd(folder, isMain);
-  // Symlink AGENTS.md → CLAUDE.md so Codex reads the same instructions
-  const agentsMd = `groups/${folder}/AGENTS.md`;
-  if (!existsSync(agentsMd)) {
-    try {
-      symlinkSync("CLAUDE.md", agentsMd);
-      log.info(TAG, `Symlinked ${agentsMd} → CLAUDE.md`);
-    } catch {
-      // ignore if symlink already exists or fails
-    }
-  }
   syncSystemSkills(folder);
-  // Symlink .agents/skills → .claude/skills so Codex discovers the same skills
-  const agentsSkillsDir = `groups/${folder}/.agents`;
-  const agentsSkillsLink = `${agentsSkillsDir}/skills`;
-  if (!existsSync(agentsSkillsLink)) {
-    mkdirSync(agentsSkillsDir, { recursive: true });
-    try {
-      symlinkSync("../.claude/skills", agentsSkillsLink);
-      log.info(TAG, `Symlinked ${agentsSkillsLink} → .claude/skills`);
-    } catch {
-      // ignore if symlink already exists or fails
-    }
-  }
 }
 
 function autoRegisterChat(chatId: string) {
@@ -188,75 +163,17 @@ for (const group of listGroups(db)) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Start internal API for MCP stdio servers (send_message, send_image)
+// 5. Start unified Claude runtime
 // ---------------------------------------------------------------------------
-const INTERNAL_PORT = Number(process.env.INTERNAL_PORT || 9800);
-Bun.serve({
-  port: INTERNAL_PORT,
-  routes: {
-    "/internal/send": {
-      POST: async (req: Request) => {
-        const { chatJid, text } = (await req.json()) as { chatJid: string; text: string };
-        await channelManager.send(chatJid, text);
-        return Response.json({ ok: true });
-      },
-    },
-    "/internal/send-image": {
-      POST: async (req: Request) => {
-        const { chatJid, filePath } = (await req.json()) as { chatJid: string; filePath: string };
-        await channelManager.sendImage(chatJid, filePath);
-        return Response.json({ ok: true });
-      },
-    },
-    "/internal/refresh-groups": {
-      POST: async () => {
-        const chats = await channelManager.refreshGroupMetadata();
-        return Response.json({ count: chats.length });
-      },
-    },
-    "/internal/tool-call": {
-      POST: async (req: Request) => {
-        const { toolName, groupFolder, args } = (await req.json()) as {
-          toolName: string;
-          groupFolder: string;
-          args: Record<string, unknown>;
-        };
-        const group = getGroupByFolder(db, groupFolder);
-        const isMain = group?.is_main === 1;
-        const sender: MessageSender = {
-          send: (chatJid, text) => channelManager.send(chatJid, text),
-          sendImage: (chatJid, filePath) => channelManager.sendImage(chatJid, filePath),
-          refreshGroupMetadata: async () => {
-            const chats = await channelManager.refreshGroupMetadata();
-            return { count: chats.length };
-          },
-        };
-        const tools = createGroupToolDefs(groupFolder, isMain, db, sender);
-        const tool = tools.find((t) => t.name === toolName);
-        if (!tool) {
-          return Response.json({ error: `Tool not found: ${toolName}` }, { status: 404 });
-        }
-        const result = await tool.handler(args);
-        return Response.json(result);
-      },
-    },
-  },
-});
-log.info(TAG, `Internal API started on port ${INTERNAL_PORT}`);
-
-// ---------------------------------------------------------------------------
-// 6. Initialize provider registry
-// ---------------------------------------------------------------------------
-const providers = new ProviderRegistry();
-providers.register(new ClaudeProvider());
-providers.register(new CodexProvider());
-providers.register(new KimiProvider());
-log.info(TAG, `Providers registered: ${providers.list().join(", ")}`);
+const proxyManager = new OpenAIProxyManager();
+await proxyManager.start();
+const provider = new ClaudeProvider(proxyManager);
+log.info(TAG, "Unified Claude runtime initialized");
 
 // ---------------------------------------------------------------------------
 // 6. Create group queue
 // ---------------------------------------------------------------------------
-const groupQueue = new GroupQueue(db, channelManager, providers);
+const groupQueue = new GroupQueue(db, channelManager, provider);
 
 // ---------------------------------------------------------------------------
 // 7. Start channels, message loop, and scheduler

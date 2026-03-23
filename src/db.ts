@@ -273,10 +273,6 @@ export function updateGroupProvider(
   db.query(
     "UPDATE registered_groups SET agent_provider = $provider WHERE folder = $folder",
   ).run({ folder, provider });
-  // Clear session when switching provider — sessions are not cross-compatible
-  db.query(
-    "DELETE FROM sessions WHERE group_folder = $folder",
-  ).run({ folder });
 }
 
 // ---------------------------------------------------------------------------

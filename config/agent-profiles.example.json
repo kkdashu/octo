@@ -1,0 +1,37 @@
+{
+  "defaultProfile": "claude",
+  "profiles": {
+    "claude": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic"
+    },
+    "codex": {
+      "apiFormat": "openai",
+      "upstreamApi": "responses",
+      "baseUrl": "https://api.openai.com",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "model": "gpt-5.4",
+      "provider": "openai"
+    },
+    "kimi": {
+      "apiFormat": "openai",
+      "upstreamApi": "chat_completions",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "apiKeyEnv": "MOONSHOT_API_KEY",
+      "model": "kimi-k2.5",
+      "provider": "moonshot"
+    },
+    "kimi-cli": {
+      "apiFormat": "openai",
+      "upstreamApi": "chat_completions",
+      "baseUrl": "https://api.kimi.com/coding/v1",
+      "apiKeyEnv": "MOONSHOT_API_KEY",
+      "model": "kimi-k2.5",
+      "codingPlanEnabled": true,
+      "provider": "moonshot"
+    }
+  }
+}

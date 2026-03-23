@@ -1,3 +1,5 @@
+import type { ResolvedAgentProfile } from "../runtime/types";
+
 // ---------------------------------------------------------------------------
 // Agent Provider abstraction — unified interface for different AI agent backends
 // ---------------------------------------------------------------------------
@@ -24,6 +26,7 @@ export interface SessionConfig {
   isMain: boolean;
   resumeSessionId?: string;
   tools: ToolDefinition[];
+  profile: ResolvedAgentProfile;
 }
 
 /** Platform-agnostic tool definition */

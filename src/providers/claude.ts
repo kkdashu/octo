@@ -4,6 +4,8 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
 import { log } from "../logger";
+import { buildClaudeSdkEnv } from "../runtime/profile-config";
+import { OpenAIProxyManager } from "../runtime/openai-proxy";
 import type {
   AgentProvider,
   AgentSession,
@@ -92,6 +94,8 @@ function jsonSchemaToZod(schema: Record<string, unknown>): Record<string, z.ZodT
 export class ClaudeProvider implements AgentProvider {
   readonly name = "claude";
 
+  constructor(private readonly proxyManager: OpenAIProxyManager) {}
+
   async startSession(config: SessionConfig): Promise<{
     session: AgentSession;
     events: AsyncIterable<AgentEvent>;
@@ -103,6 +107,9 @@ export class ClaudeProvider implements AgentProvider {
       isMain: config.isMain,
       hasResume: !!config.resumeSessionId,
       promptLength: config.initialPrompt.length,
+      profileKey: config.profile.profileKey,
+      apiFormat: config.profile.apiFormat,
+      model: config.profile.model,
     });
 
     // Build message channel (async generator for streaming input)
@@ -143,21 +150,31 @@ export class ClaudeProvider implements AgentProvider {
       ...toolNames,
     ];
 
+    const proxyRoute =
+      config.profile.apiFormat === "openai"
+        ? this.proxyManager.acquire(config.profile)
+        : undefined;
+    const env = buildClaudeSdkEnv(config.profile, proxyRoute);
+
     log.info(TAG, "Agent configuration", {
       cwd: groupWorkdir,
       allowedTools,
       permissionMode: "bypassPermissions",
       resuming: !!config.resumeSessionId,
+      anthropicBaseUrl: env.ANTHROPIC_BASE_URL,
+      profileKey: config.profile.profileKey,
     });
 
     const queryIter = query({
       prompt: messageGenerator(config.initialPrompt),
       options: {
-        model: "claude-sonnet-4-6",
+        model: config.profile.model,
         settingSources: ["project"],
         mcpServers: { "octo-tools": mcpServer },
         allowedTools,
         permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        env,
         ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
         cwd: groupWorkdir,
       },
@@ -204,6 +221,8 @@ export class ClaudeProvider implements AgentProvider {
       } catch (err) {
         log.error(TAG, `Agent error for group ${config.groupFolder}`, err);
         yield { type: "error", error: err instanceof Error ? err : new Error(String(err)) };
+      } finally {
+        proxyRoute?.release();
       }
     }
 

@@ -10,6 +10,7 @@ import {
   updateTaskStatus,
   updateGroupProvider,
 } from "./db";
+import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
@@ -340,13 +341,38 @@ export function createGroupToolDefs(
           },
         },
         {
+          name: "list_profiles",
+          description: "List all configured agent profiles with model and upstream details",
+          schema: { type: "object", properties: {}, required: [] },
+          handler: async () => {
+            log.info(TAG, `[list_profiles] called by main group`);
+            const config = loadAgentProfilesConfig();
+            const profiles = listAgentProfiles();
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    {
+                      defaultProfile: config.defaultProfile,
+                      profiles,
+                    },
+                    null,
+                    2,
+                  ),
+                },
+              ],
+            };
+          },
+        },
+        {
           name: "switch_provider",
-          description: "Switch the AI agent provider for a group. Available providers: claude, codex",
+          description: "Switch the agent profile for a group. Use list_profiles to see available profile keys.",
           schema: {
             type: "object",
             properties: {
               targetGroupFolder: { type: "string", description: "Target group folder name" },
-              provider: { type: "string", description: "Provider name (e.g. claude, codex)" },
+              provider: { type: "string", description: "Profile key (e.g. claude, codex, kimi, kimi-cli)" },
             },
             required: ["targetGroupFolder", "provider"],
           },
@@ -358,9 +384,28 @@ export function createGroupToolDefs(
             if (!target) {
               return { content: [{ type: "text", text: `Group not found: ${folder}` }] };
             }
+            const config = loadAgentProfilesConfig();
+            if (!config.profiles[provider]) {
+              const available = Object.keys(config.profiles).sort().join(", ");
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Unknown profile: ${provider}. Available profiles: ${available}`,
+                  },
+                ],
+              };
+            }
             updateGroupProvider(db, folder, provider);
-            log.info(TAG, `[switch_provider] Switched ${folder} to provider: ${provider}`);
-            return { content: [{ type: "text", text: `Group "${target.name}" (${folder}) switched to provider: ${provider}` }] };
+            log.info(TAG, `[switch_provider] Switched ${folder} to profile: ${provider}`);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Group "${target.name}" (${folder}) switched to profile: ${provider}`,
+                },
+              ],
+            };
           },
         },
       ]
