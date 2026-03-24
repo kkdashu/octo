@@ -20,6 +20,154 @@ export interface FeishuChannelConfig {
 
 const TAG = "feishu";
 
+type FeishuMessagePayload = {
+  message_type?: string;
+  content?: string;
+  message_id?: string;
+};
+
+type FeishuPostContent = {
+  title?: unknown;
+  content?: unknown;
+};
+
+type FeishuPostElement = Record<string, unknown>;
+
+function normalizeExtractedContent(text: string): string | null {
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return normalized ? normalized : null;
+}
+
+function parseFeishuMessageContent(message: FeishuMessagePayload): unknown {
+  if (!message.content) {
+    return null;
+  }
+
+  return JSON.parse(message.content) as unknown;
+}
+
+function extractTextMessageContent(message: FeishuMessagePayload): string | null {
+  const parsed = parseFeishuMessageContent(message) as Record<string, unknown> | null;
+  const text = typeof parsed?.text === "string" ? parsed.text : "";
+  return normalizeExtractedContent(text);
+}
+
+function renderPostElement(element: FeishuPostElement): string {
+  const tag = typeof element.tag === "string" ? element.tag : "";
+
+  if (tag === "text") {
+    return typeof element.text === "string" ? element.text : "";
+  }
+
+  if (tag === "a") {
+    const text = typeof element.text === "string" ? element.text : "";
+    const href = typeof element.href === "string" ? element.href : "";
+    return text || href;
+  }
+
+  if (tag === "at") {
+    const name = typeof element.user_name === "string"
+      ? element.user_name
+      : typeof element.name === "string"
+        ? element.name
+        : "";
+    return name ? `@${name}` : "";
+  }
+
+  if (tag === "code_block") {
+    const code = typeof element.text === "string" ? element.text.trimEnd() : "";
+    if (!code) {
+      return "";
+    }
+
+    const language = typeof element.language === "string"
+      ? element.language.trim()
+      : "";
+    return language
+      ? `\`\`\`${language}\n${code}\n\`\`\``
+      : `\`\`\`\n${code}\n\`\`\``;
+  }
+
+  return "";
+}
+
+function renderPostParagraph(paragraph: unknown): string {
+  if (!Array.isArray(paragraph)) {
+    return "";
+  }
+
+  const blocks: string[] = [];
+  let inlineText = "";
+
+  for (const item of paragraph) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+
+    const element = item as FeishuPostElement;
+    const tag = typeof element.tag === "string" ? element.tag : "";
+    const rendered = renderPostElement(element);
+    if (!rendered) {
+      continue;
+    }
+
+    if (tag === "code_block") {
+      const normalizedInline = normalizeExtractedContent(inlineText);
+      if (normalizedInline) {
+        blocks.push(normalizedInline);
+      }
+      blocks.push(rendered);
+      inlineText = "";
+      continue;
+    }
+
+    inlineText += rendered;
+  }
+
+  const normalizedInline = normalizeExtractedContent(inlineText);
+  if (normalizedInline) {
+    blocks.push(normalizedInline);
+  }
+
+  return blocks.join("\n");
+}
+
+function extractPostMessageContent(message: FeishuMessagePayload): string | null {
+  const parsed = parseFeishuMessageContent(message) as FeishuPostContent | null;
+  const blocks: string[] = [];
+
+  if (typeof parsed?.title === "string" && parsed.title.trim()) {
+    blocks.push(parsed.title.trim());
+  }
+
+  if (Array.isArray(parsed?.content)) {
+    for (const paragraph of parsed.content) {
+      const rendered = renderPostParagraph(paragraph);
+      if (rendered) {
+        blocks.push(rendered);
+      }
+    }
+  }
+
+  return normalizeExtractedContent(blocks.join("\n"));
+}
+
+function extractFeishuMessageContent(message: FeishuMessagePayload): string | null {
+  if (message.message_type === "text") {
+    return extractTextMessageContent(message);
+  }
+
+  if (message.message_type === "post") {
+    return extractPostMessageContent(message);
+  }
+
+  return null;
+}
+
 export class FeishuChannel implements Channel {
   readonly type = "feishu";
 
@@ -272,10 +420,8 @@ export class FeishuChannel implements Channel {
   }
 
   private extractTextContent(message: any): string | null {
-    if (message.message_type !== "text") return null;
     try {
-      const parsed = JSON.parse(message.content);
-      return parsed.text || null;
+      return extractFeishuMessageContent(message);
     } catch {
       log.warn(TAG, "Failed to parse message content JSON", {
         messageId: message.message_id,
@@ -298,3 +444,9 @@ export class FeishuChannel implements Channel {
     return result;
   }
 }
+
+export const __test__ = {
+  extractFeishuMessageContent,
+  normalizeExtractedContent,
+  renderPostParagraph,
+};
