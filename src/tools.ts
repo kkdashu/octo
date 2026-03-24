@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  deleteSessionId,
   getGroupByFolder,
   listGroups,
   registerGroup,
@@ -24,7 +23,7 @@ export interface MessageSender {
   send(chatJid: string, text: string): Promise<void>;
   sendImage(chatJid: string, filePath: string): Promise<void>;
   refreshGroupMetadata(): Promise<{ count: number }>;
-  clearSession?(groupFolder: string): Promise<boolean>;
+  clearSession?(groupFolder: string): Promise<{ closedActiveSession: boolean; sessionId: string }>;
 }
 
 export function createGroupToolDefs(
@@ -432,28 +431,18 @@ export function createGroupToolDefs(
               log.error(TAG, `[clear_context] clearSession not available in sender`);
               return { content: [{ type: "text", text: "Clear session not supported" }] };
             }
-            const cleared = await sender.clearSession(folder);
-            if (cleared) {
-              log.info(TAG, `[clear_context] Context cleared for ${folder}`);
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `Context cleared for group "${target.name}" (${folder}). The group will start fresh on next message.`,
-                  },
-                ],
-              };
-            } else {
-              log.info(TAG, `[clear_context] No active session to clear for ${folder}`);
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: `No active session for group "${target.name}" (${folder}). The group will start fresh on next message.`,
-                  },
-                ],
-              };
-            }
+            const result = await sender.clearSession(folder);
+            log.info(TAG, `[clear_context] Context cleared for ${folder}`, result);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: result.closedActiveSession
+                    ? `Context cleared for group "${target.name}" (${folder}). A fresh Claude session (${result.sessionId}) is ready, and the active session was closed.`
+                    : `Context cleared for group "${target.name}" (${folder}). A fresh Claude session (${result.sessionId}) is ready for the next message.`,
+                },
+              ],
+            };
           },
         },
       ]

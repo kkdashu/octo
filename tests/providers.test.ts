@@ -8,6 +8,7 @@ describe("Provider interface compliance", () => {
     const provider = new ClaudeProvider(new OpenAIProxyManager());
     expect(provider.name).toBe("claude");
     expect(typeof provider.startSession).toBe("function");
+    expect(typeof provider.clearContext).toBe("function");
   });
 });
 
@@ -26,6 +27,7 @@ describe("AgentEvent stream contract", () => {
           events: events(),
         };
       },
+      clearContext: async () => ({ sessionId: "mock-cleared-session-123" }),
     };
 
     const { session, events } = await mockProvider.startSession({
@@ -56,6 +58,38 @@ describe("AgentEvent stream contract", () => {
     expect(collected[2]).toEqual({ type: "result", sessionId: "mock-session-123" });
     expect(typeof session.push).toBe("function");
     expect(typeof session.close).toBe("function");
+  });
+});
+
+describe("Provider clear context contract", () => {
+  test("mock provider clearContext returns a fresh session id", async () => {
+    const mockProvider: AgentProvider = {
+      name: "mock",
+      startSession: async (_config: SessionConfig) => ({
+        session: { push: () => {}, close: () => {} },
+        events: (async function* () {})(),
+      }),
+      clearContext: async () => ({ sessionId: "fresh-session-123" }),
+    };
+
+    const result = await mockProvider.clearContext({
+      groupFolder: "test",
+      workingDirectory: "/tmp/test",
+      initialPrompt: "/clear",
+      isMain: true,
+      tools: [],
+      profile: {
+        profileKey: "claude",
+        apiFormat: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        apiKeyEnv: "ANTHROPIC_API_KEY",
+        apiKey: "test-key",
+        model: "claude-sonnet-4-6",
+        codingPlanEnabled: false,
+      },
+    });
+
+    expect(result).toEqual({ sessionId: "fresh-session-123" });
   });
 });
 

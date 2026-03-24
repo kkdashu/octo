@@ -96,6 +96,50 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(private readonly proxyManager: OpenAIProxyManager) {}
 
+  async clearContext(config: SessionConfig): Promise<{
+    sessionId: string;
+  }> {
+    const proxyRoute =
+      config.profile.apiFormat === "openai"
+        ? this.proxyManager.acquire(config.profile)
+        : undefined;
+    const env = buildClaudeSdkEnv(config.profile, proxyRoute);
+
+    try {
+      for await (const message of query({
+        prompt: "/clear",
+        options: {
+          model: config.profile.model,
+          settingSources: ["project"],
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          env,
+          cwd: config.workingDirectory,
+          maxTurns: 1,
+          ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
+        },
+      })) {
+        if (message.type === "system" && (message as any).subtype === "init") {
+          const sessionId = (message as any).session_id;
+          if (sessionId) {
+            return { sessionId };
+          }
+        }
+
+        if (message.type === "result") {
+          const sessionId = (message as any).session_id;
+          if (sessionId) {
+            return { sessionId };
+          }
+        }
+      }
+    } finally {
+      proxyRoute?.release();
+    }
+
+    throw new Error(`Failed to clear context for group ${config.groupFolder}: no new session id returned`);
+  }
+
   async startSession(config: SessionConfig): Promise<{
     session: AgentSession;
     events: AsyncIterable<AgentEvent>;
