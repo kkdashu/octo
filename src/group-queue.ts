@@ -1,15 +1,35 @@
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
+import { listSessions } from "@anthropic-ai/claude-agent-sdk";
 import type { ChannelManager } from "./channels/manager";
 import { resolveAgentProfile } from "./runtime/profile-config";
 import { ClaudeProvider } from "./providers/claude";
 import type { AgentSession } from "./providers/types";
-import { getGroupByFolder, getSessionId, saveSessionId } from "./db";
+import { deleteSessionId, getGroupByFolder, getSessionId, saveSessionId } from "./db";
 import { createGroupToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "group-queue";
+
+export async function resolveClaudeResumeSessionId(
+  workingDirectory: string,
+  persistedSessionId: string | null,
+  listDirSessions: typeof listSessions = listSessions,
+): Promise<string | undefined> {
+  if (!persistedSessionId) {
+    return undefined;
+  }
+
+  const sessions = await listDirSessions({
+    dir: workingDirectory,
+    includeWorktrees: false,
+  });
+
+  return sessions.some((session) => session.sessionId === persistedSessionId)
+    ? persistedSessionId
+    : undefined;
+}
 
 export class GroupQueue {
   private locks: Map<string, Promise<void>> = new Map();
@@ -118,14 +138,27 @@ export class GroupQueue {
         },
       };
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
-      const sessionId = getSessionId(this.db, groupFolder);
+      const persistedSessionId = getSessionId(this.db, groupFolder);
+      const workingDirectory = resolve("groups", groupFolder);
+      const resumeSessionId = await resolveClaudeResumeSessionId(
+        workingDirectory,
+        persistedSessionId,
+      );
+
+      if (persistedSessionId && !resumeSessionId) {
+        deleteSessionId(this.db, groupFolder);
+        log.warn(TAG, `Discarded stale Claude session for ${groupFolder}`, {
+          persistedSessionId,
+          workingDirectory,
+        });
+      }
 
       const { session, events } = await this.provider.startSession({
         groupFolder,
-        workingDirectory: resolve("groups", groupFolder),
+        workingDirectory,
         initialPrompt,
         isMain,
-        resumeSessionId: sessionId ?? undefined,
+        resumeSessionId,
         tools,
         profile,
       });

@@ -300,6 +300,15 @@ export function saveSessionId(
   ).run({ groupFolder: folder, sessionId });
 }
 
+export function deleteSessionId(
+  db: Database,
+  folder: string,
+) {
+  db.query(
+    "DELETE FROM sessions WHERE group_folder = $groupFolder",
+  ).run({ groupFolder: folder });
+}
+
 // ---------------------------------------------------------------------------
 // Router state (cursor management)
 // ---------------------------------------------------------------------------
