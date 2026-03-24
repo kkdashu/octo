@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import {
+  deleteSessionId,
   getGroupByFolder,
   listGroups,
   registerGroup,
@@ -23,6 +24,7 @@ export interface MessageSender {
   send(chatJid: string, text: string): Promise<void>;
   sendImage(chatJid: string, filePath: string): Promise<void>;
   refreshGroupMetadata(): Promise<{ count: number }>;
+  clearSession?(groupFolder: string): Promise<boolean>;
 }
 
 export function createGroupToolDefs(
@@ -406,6 +408,52 @@ export function createGroupToolDefs(
                 },
               ],
             };
+          },
+        },
+        {
+          name: "clear_context",
+          description: "Clear conversation context for a target group. This deletes the session and the group will start fresh on next message.",
+          schema: {
+            type: "object",
+            properties: {
+              targetGroupFolder: { type: "string", description: "Target group folder name" },
+            },
+            required: ["targetGroupFolder"],
+          },
+          handler: async (args) => {
+            const folder = args.targetGroupFolder as string;
+            log.info(TAG, `[clear_context] called by main group`, { folder });
+            const target = getGroupByFolder(db, folder);
+            if (!target) {
+              log.warn(TAG, `[clear_context] Target group not found: ${folder}`);
+              return { content: [{ type: "text", text: `Group not found: ${folder}` }] };
+            }
+            if (!sender.clearSession) {
+              log.error(TAG, `[clear_context] clearSession not available in sender`);
+              return { content: [{ type: "text", text: "Clear session not supported" }] };
+            }
+            const cleared = await sender.clearSession(folder);
+            if (cleared) {
+              log.info(TAG, `[clear_context] Context cleared for ${folder}`);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Context cleared for group "${target.name}" (${folder}). The group will start fresh on next message.`,
+                  },
+                ],
+              };
+            } else {
+              log.info(TAG, `[clear_context] No active session to clear for ${folder}`);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `No active session for group "${target.name}" (${folder}). The group will start fresh on next message.`,
+                  },
+                ],
+              };
+            }
           },
         },
       ]

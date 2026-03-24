@@ -136,6 +136,7 @@ export class GroupQueue {
           const chats = await this.channelManager.refreshGroupMetadata();
           return { count: chats.length };
         },
+        clearSession: (folder) => this.clearSession(folder),
       };
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
       const persistedSessionId = getSessionId(this.db, groupFolder);
@@ -211,5 +212,25 @@ export class GroupQueue {
       session.close();
       this.activeSessions.delete(groupFolder);
     }
+  }
+
+  /** Clear session for a group (called by clear_context tool from main group) */
+  async clearSession(groupFolder: string): Promise<boolean> {
+    log.info(TAG, `Clearing session for group: ${groupFolder}`);
+
+    // Delete persisted session from database
+    deleteSessionId(this.db, groupFolder);
+    log.info(TAG, `Deleted session ID from database for ${groupFolder}`);
+
+    // Close active session if exists
+    const session = this.activeSessions.get(groupFolder);
+    if (session) {
+      log.info(TAG, `Closing active session for ${groupFolder}`);
+      session.close();
+      this.activeSessions.delete(groupFolder);
+      return true;
+    }
+
+    return false;
   }
 }
