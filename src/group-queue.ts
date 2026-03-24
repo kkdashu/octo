@@ -215,22 +215,55 @@ export class GroupQueue {
   }
 
   /** Clear session for a group (called by clear_context tool from main group) */
-  async clearSession(groupFolder: string): Promise<boolean> {
+  async clearSession(groupFolder: string): Promise<{ closedActiveSession: boolean; sessionId: string }> {
     log.info(TAG, `Clearing session for group: ${groupFolder}`);
 
-    // Delete persisted session from database
-    deleteSessionId(this.db, groupFolder);
-    log.info(TAG, `Deleted session ID from database for ${groupFolder}`);
-
-    // Close active session if exists
-    const session = this.activeSessions.get(groupFolder);
-    if (session) {
-      log.info(TAG, `Closing active session for ${groupFolder}`);
-      session.close();
-      this.activeSessions.delete(groupFolder);
-      return true;
+    const group = getGroupByFolder(this.db, groupFolder);
+    if (!group) {
+      throw new Error(`Group not found: ${groupFolder}`);
     }
 
-    return false;
+    const closedActiveSession = this.activeSessions.has(groupFolder);
+    const activeSession = this.activeSessions.get(groupFolder);
+    if (activeSession) {
+      log.info(TAG, `Closing active session for ${groupFolder} before slash clear`);
+      activeSession.close();
+      this.activeSessions.delete(groupFolder);
+    }
+
+    const requestedProfileKey = group.agent_provider || "claude";
+    const profile = resolveAgentProfile(requestedProfileKey);
+    const workingDirectory = resolve("groups", groupFolder);
+    const persistedSessionId = getSessionId(this.db, groupFolder);
+    const resumeSessionId = await resolveClaudeResumeSessionId(
+      workingDirectory,
+      persistedSessionId,
+    );
+
+    if (persistedSessionId && !resumeSessionId) {
+      deleteSessionId(this.db, groupFolder);
+      log.warn(TAG, `Discarded stale Claude session before clear for ${groupFolder}`, {
+        persistedSessionId,
+        workingDirectory,
+      });
+    }
+
+    const { sessionId } = await this.provider.clearContext({
+      groupFolder,
+      workingDirectory,
+      initialPrompt: "/clear",
+      isMain: group.is_main === 1,
+      resumeSessionId,
+      tools: [],
+      profile,
+    });
+
+    saveSessionId(this.db, groupFolder, sessionId);
+    log.info(TAG, `Context cleared via Claude slash command for ${groupFolder}`, {
+      sessionId,
+      closedActiveSession,
+    });
+
+    return { closedActiveSession, sessionId };
   }
 }

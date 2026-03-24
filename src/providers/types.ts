@@ -49,4 +49,8 @@ export interface AgentProvider {
     session: AgentSession;
     events: AsyncIterable<AgentEvent>;
   }>;
+
+  clearContext(config: SessionConfig): Promise<{
+    sessionId: string;
+  }>;
 }
