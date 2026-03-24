@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { log } from "../logger";
 import type {
   AgentProfileConfig,
   AgentProfilesConfig,
@@ -31,6 +32,9 @@ type CachedConfig = {
 };
 
 let cachedConfig: CachedConfig | null = null;
+const TAG = "profile-config";
+const MOONSHOT_ANTHROPIC_BASE_URL = "https://api.moonshot.cn/anthropic";
+const MOONSHOT_CODING_PLAN_ANTHROPIC_BASE_URL = "https://api.kimi.com/coding";
 
 function getCandidateConfigPaths(): string[] {
   const configured = process.env.AGENT_PROFILES_PATH?.trim();
@@ -87,6 +91,11 @@ export function loadAgentProfilesConfig(): AgentProfilesConfig {
     config,
   };
 
+  log.info(TAG, `Loaded agent profiles from ${configPath}`, {
+    defaultProfile: config.defaultProfile,
+    profileKeys: Object.keys(config.profiles),
+  });
+
   return config;
 }
 
@@ -107,42 +116,61 @@ function resolveProfileDefinition(profileKey?: string): {
   };
 }
 
+function applyProviderCompatibility(config: AgentProfileConfig): AgentProfileConfig {
+  if (config.provider !== "moonshot") {
+    return config;
+  }
+
+  return {
+    ...config,
+    apiFormat: "anthropic",
+    upstreamApi: undefined,
+    baseUrl: config.codingPlanEnabled
+      ? MOONSHOT_CODING_PLAN_ANTHROPIC_BASE_URL
+      : MOONSHOT_ANTHROPIC_BASE_URL,
+  };
+}
+
 export function resolveAgentProfile(profileKey?: string): ResolvedAgentProfile {
   const resolved = resolveProfileDefinition(profileKey);
-  const apiKey = process.env[resolved.config.apiKeyEnv]?.trim();
+  const compatibleConfig = applyProviderCompatibility(resolved.config);
+  const apiKey = process.env[compatibleConfig.apiKeyEnv]?.trim();
 
   if (!apiKey) {
     throw new Error(
-      `Environment variable ${resolved.config.apiKeyEnv} is required for agent profile "${resolved.key}".`,
+      `Environment variable ${compatibleConfig.apiKeyEnv} is required for agent profile "${resolved.key}".`,
     );
   }
 
   return {
     profileKey: resolved.key,
-    apiFormat: resolved.config.apiFormat,
-    upstreamApi: resolved.config.upstreamApi,
-    baseUrl: resolved.config.baseUrl.trim().replace(/\/+$/, ""),
-    apiKeyEnv: resolved.config.apiKeyEnv,
+    apiFormat: compatibleConfig.apiFormat,
+    upstreamApi: compatibleConfig.upstreamApi,
+    baseUrl: compatibleConfig.baseUrl.trim().replace(/\/+$/, ""),
+    apiKeyEnv: compatibleConfig.apiKeyEnv,
     apiKey,
-    model: resolved.config.model,
-    provider: resolved.config.provider,
-    codingPlanEnabled: resolved.config.codingPlanEnabled ?? false,
+    model: compatibleConfig.model,
+    provider: compatibleConfig.provider,
+    codingPlanEnabled: compatibleConfig.codingPlanEnabled ?? false,
   };
 }
 
 export function listAgentProfiles(): AgentProfileSummary[] {
   const config = loadAgentProfilesConfig();
 
-  return Object.entries(config.profiles).map(([profileKey, profile]) => ({
-    profileKey,
-    apiFormat: profile.apiFormat,
-    upstreamApi: profile.upstreamApi,
-    baseUrl: profile.baseUrl.trim().replace(/\/+$/, ""),
-    apiKeyEnv: profile.apiKeyEnv,
-    model: profile.model,
-    provider: profile.provider,
-    codingPlanEnabled: profile.codingPlanEnabled ?? false,
-  }));
+  return Object.entries(config.profiles).map(([profileKey, profile]) => {
+    const compatibleProfile = applyProviderCompatibility(profile);
+    return {
+      profileKey,
+      apiFormat: compatibleProfile.apiFormat,
+      upstreamApi: compatibleProfile.upstreamApi,
+      baseUrl: compatibleProfile.baseUrl.trim().replace(/\/+$/, ""),
+      apiKeyEnv: compatibleProfile.apiKeyEnv,
+      model: compatibleProfile.model,
+      provider: compatibleProfile.provider,
+      codingPlanEnabled: compatibleProfile.codingPlanEnabled ?? false,
+    };
+  });
 }
 
 export function buildClaudeSdkEnv(

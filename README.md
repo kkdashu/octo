@@ -23,7 +23,7 @@
           → Anthropic 直连
           或
           → 本地 OpenAI 兼容 proxy
-            → OpenAI / Moonshot / 其他 OpenAI 兼容上游
+            → OpenAI / 其他 OpenAI 兼容上游
 ```
 
 ## 快速开始
@@ -41,6 +41,13 @@ bun run start
 1. `AGENT_PROFILES_PATH` 指向的配置文件
 2. 若未设置，则尝试 `config/agent-profiles.json`
 3. 若仍不存在，则回退到 `config/agent-profiles.example.json`
+
+Moonshot/Kimi 线路说明：
+
+- `kimi`：走 `https://api.moonshot.cn/anthropic`
+- `kimi-cli`：走 `https://api.kimi.com/coding`
+- 这两条线路都以 Anthropic 兼容模式直连 Claude Agent SDK，不经过本地 OpenAI 兼容 proxy
+- 本地 OpenAI 兼容 proxy 只用于真正的 OpenAI 格式 profile，例如 `codex`
 
 ## 切换线路
 
@@ -77,6 +84,21 @@ sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-c
       "baseUrl": "https://api.openai.com",
       "apiKeyEnv": "OPENAI_API_KEY",
       "model": "gpt-5.4"
+    },
+    "kimi": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.moonshot.cn/anthropic",
+      "apiKeyEnv": "MOONSHOT_API_KEY",
+      "model": "kimi-k2.5",
+      "provider": "moonshot"
+    },
+    "kimi-cli": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.kimi.com/coding",
+      "apiKeyEnv": "MOONSHOT_API_KEY",
+      "model": "kimi-k2.5",
+      "codingPlanEnabled": true,
+      "provider": "moonshot"
     }
   }
 }

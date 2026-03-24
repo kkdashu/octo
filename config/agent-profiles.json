@@ -1,5 +1,5 @@
 {
-  "defaultProfile": "claude",
+  "defaultProfile": "codex",
   "profiles": {
     "claude": {
       "apiFormat": "anthropic",
@@ -11,7 +11,7 @@
     "codex": {
       "apiFormat": "openai",
       "upstreamApi": "responses",
-      "baseUrl": "https://api.openai.com",
+      "baseUrl": "https://www.right.codes/codex/v1",
       "apiKeyEnv": "OPENAI_API_KEY",
       "model": "gpt-5.4",
       "provider": "openai"

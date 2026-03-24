@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initDatabase, saveSessionId, updateGroupProvider } from "../src/db";
+import { resolveClaudeResumeSessionId } from "../src/group-queue";
 import {
   buildClaudeSdkEnv,
   listAgentProfiles,
@@ -36,6 +37,23 @@ function createTempProfilesConfig(): { dir: string; path: string } {
             model: "gpt-5.4",
             provider: "openai",
           },
+          kimi: {
+            apiFormat: "openai",
+            upstreamApi: "chat_completions",
+            baseUrl: "https://api.moonshot.cn/v1",
+            apiKeyEnv: "MOONSHOT_API_KEY",
+            model: "kimi-k2.5",
+            provider: "moonshot",
+          },
+          "kimi-cli": {
+            apiFormat: "openai",
+            upstreamApi: "chat_completions",
+            baseUrl: "https://api.kimi.com/coding/v1",
+            apiKeyEnv: "MOONSHOT_API_KEY",
+            model: "kimi-k2.5",
+            codingPlanEnabled: true,
+            provider: "moonshot",
+          },
         },
       },
       null,
@@ -54,6 +72,7 @@ describe("profile-config", () => {
     process.env.AGENT_PROFILES_PATH = temp.path;
     process.env.ANTHROPIC_API_KEY = "ant-key";
     process.env.OPENAI_API_KEY = "openai-key";
+    process.env.MOONSHOT_API_KEY = "moonshot-key";
   });
 
   afterEach(() => {
@@ -87,12 +106,61 @@ describe("profile-config", () => {
 
   test("lists configured profiles and builds claude env", () => {
     const profiles = listAgentProfiles();
-    expect(profiles.map((profile) => profile.profileKey)).toEqual(["claude", "codex"]);
+    expect(profiles.map((profile) => profile.profileKey)).toEqual([
+      "claude",
+      "codex",
+      "kimi",
+      "kimi-cli",
+    ]);
 
     const env = buildClaudeSdkEnv(resolveAgentProfile("claude"));
     expect(env.ANTHROPIC_API_KEY).toBe("ant-key");
     expect(env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
     expect(env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-6");
+  });
+
+  test("resolves moonshot profile to anthropic compatibility endpoint", () => {
+    const profile = resolveAgentProfile("kimi");
+    expect(profile.profileKey).toBe("kimi");
+    expect(profile.apiFormat).toBe("anthropic");
+    expect(profile.upstreamApi).toBeUndefined();
+    expect(profile.baseUrl).toBe("https://api.moonshot.cn/anthropic");
+    expect(profile.apiKey).toBe("moonshot-key");
+  });
+
+  test("resolves moonshot coding plan profile to direct anthropic endpoint", () => {
+    const profile = resolveAgentProfile("kimi-cli");
+    expect(profile.profileKey).toBe("kimi-cli");
+    expect(profile.apiFormat).toBe("anthropic");
+    expect(profile.upstreamApi).toBeUndefined();
+    expect(profile.baseUrl).toBe("https://api.kimi.com/coding");
+    expect(profile.codingPlanEnabled).toBe(true);
+
+    const env = buildClaudeSdkEnv(profile);
+    expect(env.ANTHROPIC_API_KEY).toBe("moonshot-key");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.kimi.com/coding");
+    expect(env.ANTHROPIC_MODEL).toBe("kimi-k2.5");
+  });
+
+  test("lists moonshot profiles with resolved runtime endpoints", () => {
+    const profiles = listAgentProfiles();
+    expect(profiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          profileKey: "kimi",
+          apiFormat: "anthropic",
+          upstreamApi: undefined,
+          baseUrl: "https://api.moonshot.cn/anthropic",
+        }),
+        expect.objectContaining({
+          profileKey: "kimi-cli",
+          apiFormat: "anthropic",
+          upstreamApi: undefined,
+          baseUrl: "https://api.kimi.com/coding",
+          codingPlanEnabled: true,
+        }),
+      ]),
+    );
   });
 });
 
@@ -294,5 +362,34 @@ describe("db session retention on profile switch", () => {
       .get() as { session_id: string } | null;
 
     expect(row?.session_id).toBe("session-1");
+  });
+});
+
+describe("claude session resume validation", () => {
+  test("keeps persisted session id when it exists in Claude session storage", async () => {
+    const resumeSessionId = await resolveClaudeResumeSessionId(
+      "/tmp/group-1",
+      "session-1",
+      async () => [
+        {
+          sessionId: "session-1",
+          summary: "latest",
+          lastModified: Date.now(),
+          fileSize: 1,
+        },
+      ],
+    );
+
+    expect(resumeSessionId).toBe("session-1");
+  });
+
+  test("drops persisted session id when it no longer exists in Claude session storage", async () => {
+    const resumeSessionId = await resolveClaudeResumeSessionId(
+      "/tmp/group-1",
+      "legacy-session",
+      async () => [],
+    );
+
+    expect(resumeSessionId).toBeUndefined();
   });
 });
