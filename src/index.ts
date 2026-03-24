@@ -123,7 +123,17 @@ const feishu = new FeishuChannel(
         timestamp: message.timestamp,
         mentionsMe: message.mentionsMe,
       });
-      insertMessage(db, message);
+      insertMessage(db, {
+        id: message.id,
+        chatId: message.chatId,
+        sender: message.sender,
+        senderName: message.senderName,
+        content: message.content,
+        timestamp: message.timestamp,
+        role: "user",
+        isFromMe: message.isFromMe,
+        mentionsMe: message.mentionsMe,
+      });
       log.debug(TAG, "Message inserted into database successfully");
 
       // Auto-register unregistered chats

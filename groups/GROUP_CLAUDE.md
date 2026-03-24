@@ -32,10 +32,13 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 ## Memory
 
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+Octo runtime injects participant-specific long-term memory at prompt time.
+
+- User memory is stored as markdown files under `store/memory/users/<user-key>/MEMORY.md`
+- Memory is user-scoped across chats, not group-scoped
+- On Feishu, the user key is derived from the sender `open_id`, so the same person can carry memory across groups
+- Use `memory_user_edits` only when a user explicitly asks to remember, list, update, or delete durable personal memory
+- Always use the `targetUserKey` from the injected `<participant_memories>` block; never guess or reuse another user's key
 
 ## Available Tools
 
@@ -45,6 +48,7 @@ When calling tools that require `groupFolder`, use the name of your current work
 |------|-------------|
 | `send_message` | Send message to a chat group |
 | `send_image` | Send image to a chat group |
+| `memory_user_edits` | Read or edit markdown-based per-user memory |
 | `schedule_task` | Create scheduled task |
 | `list_tasks` | List scheduled tasks |
 | `pause_task` | Pause a task |

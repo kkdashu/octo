@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import type { Channel, ChatInfo } from "./types";
-import { getGroupByJid } from "../db";
+import { getGroupByJid, insertMessage } from "../db";
 import { log } from "../logger";
 
 const TAG = "channel-mgr";
@@ -45,6 +46,18 @@ export class ChannelManager {
     const channel = this.getChannelForChat(chatJid);
     if (channel) {
       await channel.sendMessage(chatJid, text);
+      insertMessage(this.db, {
+        id: `assistant:${randomUUID()}`,
+        chatId: chatJid,
+        sender: `assistant:${channel.type}`,
+        senderName: "Octo",
+        content: text,
+        timestamp: new Date().toISOString(),
+        role: "assistant",
+        isFromMe: true,
+        isBotMessage: true,
+        mentionsMe: false,
+      });
     } else {
       log.error(TAG, `No channel found for chat ${chatJid}`);
     }

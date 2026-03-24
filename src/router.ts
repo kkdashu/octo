@@ -121,6 +121,10 @@ function processMessages(
 
     // Format ALL accumulated messages as prompt context (including non-trigger ones)
     const prompt = formatMessagesAsPrompt(messages);
+    const input = {
+      prompt,
+      messages,
+    };
 
     log.info(TAG, `Triggering agent for group ${group.folder}`, {
       triggerMessageCount: triggerMessages.length,
@@ -132,10 +136,10 @@ function processMessages(
 
     if (groupQueue.isActive(group.folder)) {
       log.info(TAG, `Pushing follow-up to active session: ${group.folder}`);
-      groupQueue.pushMessage(group.folder, prompt);
+      groupQueue.pushMessage(group.folder, input);
     } else {
       log.info(TAG, `Starting new agent session for: ${group.folder}`);
-      groupQueue.enqueue(group.folder, prompt);
+      groupQueue.enqueue(group.folder, input);
     }
 
     // Only advance cursor AFTER messages are sent to agent

@@ -80,15 +80,16 @@ function pollAndExecute(
 
     // Enqueue the task prompt into the group queue
     const prompt = `[Scheduled Task ${task.id}]\n${task.prompt}`;
+    const input = { prompt };
 
     if (task.context_mode === "group" && groupQueue.isActive(task.group_folder)) {
       // Reuse active session
       log.info(TAG, `Pushing scheduled task to active session: ${task.group_folder}`);
-      groupQueue.pushMessage(task.group_folder, prompt);
+      groupQueue.pushMessage(task.group_folder, input);
     } else {
       // Start new agent (or queue behind existing)
       log.info(TAG, `Enqueuing scheduled task as new agent run: ${task.group_folder}`);
-      groupQueue.enqueue(task.group_folder, prompt);
+      groupQueue.enqueue(task.group_folder, input);
     }
   }
 }

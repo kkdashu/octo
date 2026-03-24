@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+export type MessageRole = "user" | "assistant" | "system";
+
 // ---------------------------------------------------------------------------
 // Database initialization
 // ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@ export function initDatabase(dbPath: string): Database {
       sender_name TEXT,
       content TEXT,
       timestamp TEXT,
+      role TEXT NOT NULL DEFAULT 'user',
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
       mentions_me INTEGER DEFAULT 0,
@@ -78,6 +81,24 @@ export function initDatabase(dbPath: string): Database {
     // Column already exists, ignore
   }
   try {
+    db.run("ALTER TABLE messages ADD COLUMN role TEXT DEFAULT 'user'");
+  } catch {
+    // Column already exists, ignore
+  }
+  db.run(`
+    UPDATE messages
+    SET role = CASE
+      WHEN COALESCE(is_bot_message, 0) = 1 OR COALESCE(is_from_me, 0) = 1 THEN 'assistant'
+      ELSE 'user'
+    END
+    WHERE role IS NULL
+       OR TRIM(role) = ''
+       OR (
+         role = 'user'
+         AND (COALESCE(is_bot_message, 0) = 1 OR COALESCE(is_from_me, 0) = 1)
+       )
+  `);
+  try {
     db.run("ALTER TABLE registered_groups ADD COLUMN agent_provider TEXT DEFAULT 'claude'");
   } catch {
     // Column already exists, ignore
@@ -109,6 +130,7 @@ export interface MessageRow {
   sender_name: string;
   content: string;
   timestamp: string;
+  role: MessageRole;
   is_from_me: number;
   is_bot_message: number;
   mentions_me: number;
@@ -142,14 +164,16 @@ export function insertMessage(
     senderName: string;
     content: string;
     timestamp: string;
+    role?: MessageRole;
     isFromMe: boolean;
     isBotMessage?: boolean;
     mentionsMe?: boolean;
   },
 ) {
+  const role = msg.role ?? ((msg.isBotMessage || msg.isFromMe) ? "assistant" : "user");
   db.query(
-    `INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, mentions_me)
-     VALUES ($id, $chatJid, $sender, $senderName, $content, $timestamp, $isFromMe, $isBotMessage, $mentionsMe)`,
+    `INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, role, is_from_me, is_bot_message, mentions_me)
+     VALUES ($id, $chatJid, $sender, $senderName, $content, $timestamp, $role, $isFromMe, $isBotMessage, $mentionsMe)`,
   ).run({
     id: msg.id,
     chatJid: msg.chatId,
@@ -157,6 +181,7 @@ export function insertMessage(
     senderName: msg.senderName,
     content: msg.content,
     timestamp: msg.timestamp,
+    role,
     isFromMe: msg.isFromMe ? 1 : 0,
     isBotMessage: msg.isBotMessage ? 1 : 0,
     mentionsMe: msg.mentionsMe ? 1 : 0,
@@ -172,6 +197,7 @@ export function insertMessages(
     senderName: string;
     content: string;
     timestamp: string;
+    role?: MessageRole;
     isFromMe: boolean;
   }>,
 ) {
@@ -191,7 +217,7 @@ export function getUnprocessedMessages(
   return db
     .query(
       `SELECT * FROM messages
-       WHERE chat_jid = $chatJid AND timestamp > $since
+       WHERE chat_jid = $chatJid AND timestamp > $since AND role = 'user'
        ORDER BY timestamp ASC`,
     )
     .all({ chatJid, since }) as MessageRow[];

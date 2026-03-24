@@ -5,12 +5,25 @@ import type { ChannelManager } from "./channels/manager";
 import { resolveAgentProfile } from "./runtime/profile-config";
 import { ClaudeProvider } from "./providers/claude";
 import type { AgentSession } from "./providers/types";
-import { deleteSessionId, getGroupByFolder, getSessionId, saveSessionId } from "./db";
+import { deleteSessionId, getGroupByFolder, getSessionId, saveSessionId, type MessageRow } from "./db";
+import { applyAutomaticMemoryUpdates, buildParticipantMemoryPrefix } from "./memory/service";
 import { createGroupToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "group-queue";
+
+export interface GroupTurnInput {
+  prompt: string;
+  messages?: MessageRow[];
+}
+
+interface ActiveSessionState {
+  session: AgentSession;
+  channelType: string;
+  pendingMessages: MessageRow[];
+  assistantChunks: string[];
+}
 
 export async function resolveClaudeResumeSessionId(
   workingDirectory: string,
@@ -33,7 +46,7 @@ export async function resolveClaudeResumeSessionId(
 
 export class GroupQueue {
   private locks: Map<string, Promise<void>> = new Map();
-  private activeSessions: Map<string, AgentSession> = new Map();
+  private activeSessions: Map<string, ActiveSessionState> = new Map();
   private activeTasks = 0;
   private concurrencyLimit: number;
   private db: Database;
@@ -53,15 +66,32 @@ export class GroupQueue {
     log.info(TAG, `GroupQueue initialized`, { concurrencyLimit });
   }
 
+  private buildTurnPrompt(channelType: string, input: GroupTurnInput): string {
+    const messages = input.messages ?? [];
+    if (messages.length === 0) {
+      return input.prompt;
+    }
+
+    const memoryPrefix = buildParticipantMemoryPrefix(".", channelType, messages);
+    return memoryPrefix
+      ? `${memoryPrefix}\n\n---\n\n${input.prompt}`
+      : input.prompt;
+  }
+
   /** Push a message to an active session, returns false if no active session */
-  pushMessage(groupFolder: string, text: string): boolean {
-    const session = this.activeSessions.get(groupFolder);
-    if (session) {
+  pushMessage(groupFolder: string, input: GroupTurnInput): boolean {
+    const activeSession = this.activeSessions.get(groupFolder);
+    if (activeSession) {
+      const prompt = this.buildTurnPrompt(activeSession.channelType, input);
+      if (input.messages?.length) {
+        activeSession.pendingMessages.push(...input.messages);
+      }
       log.info(TAG, `Pushing follow-up message to active session: ${groupFolder}`, {
-        textLength: text.length,
-        textPreview: text.substring(0, 200),
+        promptLength: prompt.length,
+        promptPreview: prompt.substring(0, 200),
+        messageCount: input.messages?.length ?? 0,
       });
-      session.push(text);
+      activeSession.session.push(prompt);
       return true;
     }
     log.debug(TAG, `No active session for ${groupFolder}, cannot push`);
@@ -74,12 +104,13 @@ export class GroupQueue {
   }
 
   /** Enqueue a new agent task for a group (serial per-group, global concurrency limit) */
-  async enqueue(groupFolder: string, initialPrompt: string): Promise<void> {
+  async enqueue(groupFolder: string, input: GroupTurnInput): Promise<void> {
     log.info(TAG, `Enqueuing agent task for group: ${groupFolder}`, {
       activeTasks: this.activeTasks,
       concurrencyLimit: this.concurrencyLimit,
       activeGroups: Array.from(this.activeSessions.keys()),
-      promptLength: initialPrompt.length,
+      promptLength: input.prompt.length,
+      messageCount: input.messages?.length ?? 0,
     });
 
     // Wait for per-group lock
@@ -88,13 +119,14 @@ export class GroupQueue {
       log.debug(TAG, `Waiting for per-group lock: ${groupFolder}`);
     }
     const task = (existing ?? Promise.resolve()).then(() =>
-      this.runWithConcurrencyLimit(groupFolder, initialPrompt),
+      this.runWithConcurrencyLimit(groupFolder, input),
     );
-    this.locks.set(groupFolder, task.then(() => {}));
+    const lockTask = task.then(() => {});
+    this.locks.set(groupFolder, lockTask);
 
     // Clean up lock reference when done
     task.finally(() => {
-      if (this.locks.get(groupFolder) === task.then(() => {})) {
+      if (this.locks.get(groupFolder) === lockTask) {
         this.locks.delete(groupFolder);
       }
     });
@@ -102,7 +134,7 @@ export class GroupQueue {
 
   private async runWithConcurrencyLimit(
     groupFolder: string,
-    initialPrompt: string,
+    input: GroupTurnInput,
   ): Promise<void> {
     // Wait for global concurrency slot
     if (this.activeTasks >= this.concurrencyLimit) {
@@ -141,6 +173,7 @@ export class GroupQueue {
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
       const persistedSessionId = getSessionId(this.db, groupFolder);
       const workingDirectory = resolve("groups", groupFolder);
+      const initialPrompt = this.buildTurnPrompt(group.channel_type, input);
       const resumeSessionId = await resolveClaudeResumeSessionId(
         workingDirectory,
         persistedSessionId,
@@ -164,40 +197,66 @@ export class GroupQueue {
         profile,
       });
 
-      this.activeSessions.set(groupFolder, session);
+      this.activeSessions.set(groupFolder, {
+        session,
+        channelType: group.channel_type,
+        pendingMessages: [...(input.messages ?? [])],
+        assistantChunks: [],
+      });
       log.info(TAG, `Agent started and session registered for ${groupFolder}`);
 
-      // Process event stream asynchronously
-      (async () => {
-        try {
-          for await (const event of events) {
-            if (event.type === "text") {
-              log.info(TAG, `Sending agent reply to chat ${group.jid}`, {
-                groupFolder,
-                textPreview: event.text.substring(0, 200),
-              });
-              await this.channelManager.send(group.jid, event.text);
-            } else if (event.type === "result") {
-              if (event.sessionId) {
-                saveSessionId(this.db, groupFolder, event.sessionId);
-                log.info(TAG, `Session ID saved for group ${groupFolder}: ${event.sessionId}`);
-              }
-              // Close the session after each turn to release the concurrency slot.
-              // The session ID is persisted above so it can be resumed on the next message.
-              session.close();
-              log.info(TAG, `Session closed after turn completion for ${groupFolder}`);
-            } else if (event.type === "error") {
-              log.error(TAG, `Agent error for group ${groupFolder}`, event.error);
+      try {
+        for await (const event of events) {
+          if (event.type === "text") {
+            const activeSession = this.activeSessions.get(groupFolder);
+            if (activeSession) {
+              activeSession.assistantChunks.push(event.text);
             }
+            log.info(TAG, `Sending agent reply to chat ${group.jid}`, {
+              groupFolder,
+              textPreview: event.text.substring(0, 200),
+            });
+            await this.channelManager.send(group.jid, event.text);
+          } else if (event.type === "result") {
+            if (event.sessionId) {
+              saveSessionId(this.db, groupFolder, event.sessionId);
+              log.info(TAG, `Session ID saved for group ${groupFolder}: ${event.sessionId}`);
+            }
+
+            const activeSession = this.activeSessions.get(groupFolder);
+            if (activeSession) {
+              const assistantText = activeSession.assistantChunks.join("\n\n").trim();
+              if (activeSession.pendingMessages.length > 0 && assistantText) {
+                try {
+                  const stats = applyAutomaticMemoryUpdates(
+                    ".",
+                    activeSession.channelType,
+                    activeSession.pendingMessages,
+                    assistantText,
+                  );
+                  log.info(TAG, `Automatic memory updates applied for ${groupFolder}`, stats);
+                } catch (err) {
+                  log.error(TAG, `Failed to apply automatic memory updates for ${groupFolder}`, err);
+                }
+              }
+            }
+
+            // Close the session after each turn to release the concurrency slot.
+            // The session ID is persisted above so it can be resumed on the next message.
+            this.activeSessions.delete(groupFolder);
+            session.close();
+            log.info(TAG, `Session closed after turn completion for ${groupFolder}`);
+          } else if (event.type === "error") {
+            log.error(TAG, `Agent error for group ${groupFolder}`, event.error);
           }
-        } catch (err) {
-          log.error(TAG, `Event stream error for group ${groupFolder}`, err);
-        } finally {
-          this.activeSessions.delete(groupFolder);
-          this.activeTasks--;
-          log.debug(TAG, `Session ended for ${groupFolder}, active: ${this.activeTasks}/${this.concurrencyLimit}`);
         }
-      })();
+      } catch (err) {
+        log.error(TAG, `Event stream error for group ${groupFolder}`, err);
+      } finally {
+        this.activeSessions.delete(groupFolder);
+        this.activeTasks--;
+        log.debug(TAG, `Session ended for ${groupFolder}, active: ${this.activeTasks}/${this.concurrencyLimit}`);
+      }
     } catch (err) {
       this.activeTasks--;
       log.error(TAG, `Failed to start agent for ${groupFolder}`, err);
@@ -206,10 +265,10 @@ export class GroupQueue {
 
   /** Remove an active session (e.g., when agent finishes) */
   removeSession(groupFolder: string) {
-    const session = this.activeSessions.get(groupFolder);
-    if (session) {
+    const activeSession = this.activeSessions.get(groupFolder);
+    if (activeSession) {
       log.info(TAG, `Removing active session for ${groupFolder}`);
-      session.close();
+      activeSession.session.close();
       this.activeSessions.delete(groupFolder);
     }
   }
@@ -227,7 +286,7 @@ export class GroupQueue {
     const activeSession = this.activeSessions.get(groupFolder);
     if (activeSession) {
       log.info(TAG, `Closing active session for ${groupFolder} before slash clear`);
-      activeSession.close();
+      activeSession.session.close();
       this.activeSessions.delete(groupFolder);
     }
 

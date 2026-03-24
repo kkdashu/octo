@@ -14,6 +14,7 @@ import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-co
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
+import { runMemoryUserEditsTool } from "./memory/service";
 import type { ToolDefinition } from "./providers/types";
 
 const TAG = "tools";
@@ -114,6 +115,59 @@ export function createGroupToolDefs(
         await sender.sendImage(args.chatJid as string, absoluteFilePath);
         log.info(TAG, `[send_image] Image sent successfully`, { chatJid: args.chatJid, filePath: absoluteFilePath });
         return { content: [{ type: "text", text: "Image sent" }] };
+      },
+    },
+    {
+      name: "memory_user_edits",
+      description: "List, add, update, or delete durable per-user memory stored in markdown files. Use only when the user explicitly asks to remember or modify memory.",
+      schema: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["list", "add", "update", "delete"],
+            description: "Memory action to perform",
+          },
+          targetUserKey: {
+            type: "string",
+            description: "Global user key from the participant_memories block",
+          },
+          id: {
+            type: "string",
+            description: "Memory entry id for update/delete",
+          },
+          text: {
+            type: "string",
+            description: "Memory text for add/update",
+          },
+          query: {
+            type: "string",
+            description: "Optional filter string for list",
+          },
+        },
+        required: ["action", "targetUserKey"],
+      },
+      handler: async (args) => {
+        const action = args.action as "list" | "add" | "update" | "delete";
+        const targetUserKey = args.targetUserKey as string;
+        log.info(TAG, `[memory_user_edits] called by group ${groupFolder}`, {
+          action,
+          targetUserKey,
+          id: args.id,
+        });
+
+        const result = runMemoryUserEditsTool(root, {
+          action,
+          targetUserKey,
+          id: args.id as string | undefined,
+          text: args.text as string | undefined,
+          query: args.query as string | undefined,
+        });
+
+        return {
+          content: [{ type: "text", text: result.text }],
+          isError: result.isError,
+        };
       },
     },
     {

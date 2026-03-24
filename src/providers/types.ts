@@ -39,6 +39,7 @@ export interface ToolDefinition {
 
 export interface ToolResult {
   content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
 }
 
 /** Agent provider — each backend implements this interface */
