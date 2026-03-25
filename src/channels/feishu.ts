@@ -24,6 +24,7 @@ type FeishuMessagePayload = {
   message_type?: string;
   content?: string;
   message_id?: string;
+  mentions?: unknown;
 };
 
 type FeishuPostContent = {
@@ -32,6 +33,7 @@ type FeishuPostContent = {
 };
 
 type FeishuPostElement = Record<string, unknown>;
+type FeishuMention = Record<string, unknown>;
 
 function normalizeExtractedContent(text: string): string | null {
   const normalized = text
@@ -50,10 +52,45 @@ function parseFeishuMessageContent(message: FeishuMessagePayload): unknown {
   return JSON.parse(message.content) as unknown;
 }
 
+function formatMentionDisplayName(name: string): string {
+  return name.startsWith("@") ? name : `@${name}`;
+}
+
+function replaceMentionKeysWithNames(
+  text: string,
+  mentions: unknown,
+): string {
+  if (!Array.isArray(mentions) || mentions.length === 0) {
+    return text;
+  }
+
+  let normalized = text;
+  for (const mention of mentions) {
+    if (!mention || typeof mention !== "object" || Array.isArray(mention)) {
+      continue;
+    }
+
+    const typedMention = mention as FeishuMention;
+    const key = typeof typedMention.key === "string" ? typedMention.key : "";
+    const name = typeof typedMention.name === "string"
+      ? typedMention.name.trim()
+      : "";
+    if (!key || !name) {
+      continue;
+    }
+
+    normalized = normalized.split(key).join(formatMentionDisplayName(name));
+  }
+
+  return normalized;
+}
+
 function extractTextMessageContent(message: FeishuMessagePayload): string | null {
   const parsed = parseFeishuMessageContent(message) as Record<string, unknown> | null;
   const text = typeof parsed?.text === "string" ? parsed.text : "";
-  return normalizeExtractedContent(text);
+  return normalizeExtractedContent(
+    replaceMentionKeysWithNames(text, message.mentions),
+  );
 }
 
 function renderPostElement(element: FeishuPostElement): string {
@@ -448,5 +485,6 @@ export class FeishuChannel implements Channel {
 export const __test__ = {
   extractFeishuMessageContent,
   normalizeExtractedContent,
+  replaceMentionKeysWithNames,
   renderPostParagraph,
 };

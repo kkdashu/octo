@@ -11,6 +11,54 @@ describe("Feishu message content extraction", () => {
     expect(content).toBe("hello world");
   });
 
+  test("replaces text mention placeholders with display names", () => {
+    const content = feishuTestHelpers.extractFeishuMessageContent({
+      message_type: "text",
+      content: JSON.stringify({ text: "@_user_1 使用adb命令查询一下你连接了哪些手机" }),
+      mentions: [
+        {
+          key: "@_user_1",
+          name: "octo",
+        },
+      ],
+    });
+
+    expect(content).toBe("@octo 使用adb命令查询一下你连接了哪些手机");
+  });
+
+  test("replaces multiple text mention placeholders", () => {
+    const content = feishuTestHelpers.extractFeishuMessageContent({
+      message_type: "text",
+      content: JSON.stringify({ text: "@_user_1 帮我找 @_user_2" }),
+      mentions: [
+        {
+          key: "@_user_1",
+          name: "octo",
+        },
+        {
+          key: "@_user_2",
+          name: "王蒙",
+        },
+      ],
+    });
+
+    expect(content).toBe("@octo 帮我找 @王蒙");
+  });
+
+  test("keeps raw mention placeholder when display name is missing", () => {
+    const content = feishuTestHelpers.extractFeishuMessageContent({
+      message_type: "text",
+      content: JSON.stringify({ text: "@_user_1 在吗" }),
+      mentions: [
+        {
+          key: "@_user_1",
+        },
+      ],
+    });
+
+    expect(content).toBe("@_user_1 在吗");
+  });
+
   test("extracts post messages with multiple paragraphs", () => {
     const content = feishuTestHelpers.extractFeishuMessageContent({
       message_type: "post",
