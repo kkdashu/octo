@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { __test__ as feishuTestHelpers } from "../src/channels/feishu";
 
 describe("Feishu message content extraction", () => {
@@ -124,5 +127,131 @@ describe("Feishu message content extraction", () => {
     );
 
     expect(normalized).toBe("第一段\n\n第二段");
+  });
+});
+
+describe("Feishu image upload helpers", () => {
+  const originalFetch = globalThis.fetch;
+  const cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (dir) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("gets tenant access token via fetch", async () => {
+    globalThis.fetch = (async (input) => {
+      expect(String(input)).toBe(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+      );
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          tenant_access_token: "tenant-token",
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const token = await feishuTestHelpers.getTenantAccessToken({
+      appId: "app-id",
+      appSecret: "app-secret",
+    });
+
+    expect(token).toBe("tenant-token");
+  });
+
+  test("uploads image with fetch and returns image key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "octo-feishu-upload-"));
+    cleanupDirs.push(dir);
+    const filePath = join(dir, "screen.png");
+    writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input, init) => {
+      calls.push({ url: String(input), init });
+
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            tenant_access_token: "tenant-token",
+          }),
+          { status: 200 },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: { image_key: "img_v3_key" },
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const imageKey = await feishuTestHelpers.uploadImageWithFetch(
+      {
+        appId: "app-id",
+        appSecret: "app-secret",
+      },
+      filePath,
+    );
+
+    expect(imageKey).toBe("img_v3_key");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.url).toBe("https://open.feishu.cn/open-apis/im/v1/images");
+    expect(calls[1]?.init?.headers).toEqual({
+      Authorization: "Bearer tenant-token",
+    });
+    expect(calls[1]?.init?.body).toBeInstanceOf(FormData);
+
+    const body = calls[1]?.init?.body as FormData;
+    expect(body.get("image_type")).toBe("message");
+    expect(body.get("image")).toBeInstanceOf(File);
+  });
+
+  test("surfaces upload failure details", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "octo-feishu-upload-"));
+    cleanupDirs.push(dir);
+    const filePath = join(dir, "screen.png");
+    writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            tenant_access_token: "tenant-token",
+          }),
+          { status: 200 },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          code: 99991663,
+          msg: "invalid image",
+        }),
+        { status: 400 },
+      );
+    }) as typeof fetch;
+
+    await expect(
+      feishuTestHelpers.uploadImageWithFetch(
+        {
+          appId: "app-id",
+          appSecret: "app-secret",
+        },
+        filePath,
+      ),
+    ).rejects.toThrow("Failed to upload image: code=99991663, msg=invalid image");
   });
 });

@@ -5,6 +5,50 @@ import { log } from "../logger";
 
 const TAG = "channel-mgr";
 
+export type OutgoingMessagePart =
+  | { type: "text"; value: string }
+  | { type: "image"; value: string };
+
+const OUTGOING_IMAGE_TAG_RE = /\[IMAGE:([^\]]+)\]|!\[[^\]]*\]\(([^)\n]+)\)/g;
+
+export function parseOutgoingMessageParts(text: string): OutgoingMessagePart[] {
+  if (!text) {
+    return [];
+  }
+
+  const parts: OutgoingMessagePart[] = [];
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(OUTGOING_IMAGE_TAG_RE)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) {
+      parts.push({
+        type: "text",
+        value: text.slice(lastIndex, start),
+      });
+    }
+
+    const imagePath = (match[1] ?? match[2] ?? "").trim();
+    if (imagePath) {
+      parts.push({
+        type: "image",
+        value: imagePath,
+      });
+    }
+
+    lastIndex = start + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({
+      type: "text",
+      value: text.slice(lastIndex),
+    });
+  }
+
+  return parts;
+}
+
 export class ChannelManager {
   private channels: Map<string, Channel> = new Map();
   private db: Database;
@@ -44,7 +88,40 @@ export class ChannelManager {
     });
     const channel = this.getChannelForChat(chatJid);
     if (channel) {
-      await channel.sendMessage(chatJid, text);
+      const parts = parseOutgoingMessageParts(text);
+      const hasImages = parts.some((part) => part.type === "image");
+
+      if (!hasImages) {
+        await channel.sendMessage(chatJid, text);
+        return;
+      }
+
+      if (!channel.sendImage) {
+        log.warn(TAG, `Channel ${channel.type} does not support image sending, falling back to raw text`, {
+          chatJid,
+          textPreview: text.substring(0, 200),
+        });
+        await channel.sendMessage(chatJid, text);
+        return;
+      }
+
+      for (const part of parts) {
+        if (part.type === "text") {
+          const chunk = part.value.trim();
+          if (!chunk) {
+            continue;
+          }
+          await channel.sendMessage(chatJid, chunk);
+          continue;
+        }
+
+        try {
+          await channel.sendImage(chatJid, part.value);
+        } catch (err) {
+          log.error(TAG, `Failed to send image to chat ${chatJid}`, err);
+          await channel.sendMessage(chatJid, `图片发送失败: ${part.value}`);
+        }
+      }
     } else {
       log.error(TAG, `No channel found for chat ${chatJid}`);
     }
@@ -102,3 +179,7 @@ export class ChannelManager {
     log.info(TAG, "All channels stopped");
   }
 }
+
+export const __test__ = {
+  parseOutgoingMessageParts,
+};

@@ -1,5 +1,6 @@
 import * as lark from "@larksuiteoapi/node-sdk";
-import { createReadStream, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { basename } from "node:path";
 import type {
   Channel,
   ChannelOptions,
@@ -34,6 +35,19 @@ type FeishuPostContent = {
 
 type FeishuPostElement = Record<string, unknown>;
 type FeishuMention = Record<string, unknown>;
+type FetchLike = typeof fetch;
+type FeishuTokenResponse = {
+  code?: number;
+  msg?: string;
+  tenant_access_token?: string;
+};
+type FeishuImageUploadResponse = {
+  code?: number;
+  msg?: string;
+  data?: {
+    image_key?: string;
+  };
+};
 
 function normalizeExtractedContent(text: string): string | null {
   const normalized = text
@@ -205,6 +219,102 @@ function extractFeishuMessageContent(message: FeishuMessagePayload): string | nu
   return null;
 }
 
+async function parseJsonResponse<T>(
+  response: Response,
+  endpoint: string,
+): Promise<T> {
+  const rawText = await response.text();
+  try {
+    return JSON.parse(rawText) as T;
+  } catch {
+    throw new Error(
+      `Failed to parse Feishu ${endpoint} response as JSON (status=${response.status}): ${rawText.slice(0, 300)}`,
+    );
+  }
+}
+
+function inferImageMimeType(filePath: string): string {
+  const normalizedPath = filePath.toLowerCase();
+  if (normalizedPath.endsWith(".png")) return "image/png";
+  if (normalizedPath.endsWith(".jpg") || normalizedPath.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (normalizedPath.endsWith(".webp")) return "image/webp";
+  if (normalizedPath.endsWith(".gif")) return "image/gif";
+  return "application/octet-stream";
+}
+
+async function getTenantAccessToken(
+  config: Pick<FeishuChannelConfig, "appId" | "appSecret">,
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const response = await fetchImpl(
+    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        app_id: config.appId,
+        app_secret: config.appSecret,
+      }),
+    },
+  );
+
+  const payload = await parseJsonResponse<FeishuTokenResponse>(
+    response,
+    "tenant_access_token/internal",
+  );
+  if (payload.code !== 0 || !payload.tenant_access_token) {
+    throw new Error(
+      `Failed to get tenant_access_token: code=${payload.code ?? "unknown"}, msg=${payload.msg ?? "unknown"}`,
+    );
+  }
+
+  return payload.tenant_access_token;
+}
+
+async function uploadImageWithFetch(
+  config: Pick<FeishuChannelConfig, "appId" | "appSecret">,
+  filePath: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const token = await getTenantAccessToken(config, fetchImpl);
+  const imageBuffer = readFileSync(filePath);
+  const form = new FormData();
+  form.append("image_type", "message");
+  form.append(
+    "image",
+    new Blob([imageBuffer], { type: inferImageMimeType(filePath) }),
+    basename(filePath) || "image",
+  );
+
+  const response = await fetchImpl(
+    "https://open.feishu.cn/open-apis/im/v1/images",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: form,
+    },
+  );
+
+  const payload = await parseJsonResponse<FeishuImageUploadResponse>(
+    response,
+    "im/v1/images",
+  );
+  const imageKey = payload.data?.image_key;
+  if (payload.code !== 0 || !imageKey) {
+    throw new Error(
+      `Failed to upload image: code=${payload.code ?? "unknown"}, msg=${payload.msg ?? "unknown"}, filePath=${filePath}`,
+    );
+  }
+
+  return imageKey;
+}
+
 export class FeishuChannel implements Channel {
   readonly type = "feishu";
 
@@ -334,16 +444,7 @@ export class FeishuChannel implements Channel {
         throw new Error(`Image file is empty: ${filePath}`);
       }
 
-      const uploadRes = await this.client.im.image.create({
-        data: {
-          image_type: "message",
-          image: createReadStream(filePath),
-        },
-      });
-      const imageKey = uploadRes?.image_key;
-      if (!imageKey) {
-        throw new Error(`Failed to get image_key after upload: ${filePath}`);
-      }
+      const imageKey = await uploadImageWithFetch(this.config, filePath);
 
       await this.client.im.message.create({
         params: {
@@ -484,7 +585,9 @@ export class FeishuChannel implements Channel {
 
 export const __test__ = {
   extractFeishuMessageContent,
+  getTenantAccessToken,
   normalizeExtractedContent,
   replaceMentionKeysWithNames,
   renderPostParagraph,
+  uploadImageWithFetch,
 };
