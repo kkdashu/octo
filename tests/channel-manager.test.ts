@@ -195,7 +195,40 @@ describe("ChannelManager outgoing rich message handling", () => {
     expect(sentImages).toEqual(["/tmp/failed.png"]);
     expect(sentTexts).toEqual([
       "前文",
-      "图片发送失败: /tmp/failed.png",
+      "图片发送失败: upload failed",
+      "后文",
+    ]);
+  });
+
+  test("falls back to file path when image send failure has no error message", async () => {
+    const { db, dir } = createTestDb();
+    cleanupDirs.push(dir);
+    registerTestGroup(db);
+
+    const sentTexts: string[] = [];
+    const sentImages: string[] = [];
+    const manager = new ChannelManager(db);
+    const channel: Channel = {
+      type: "feishu",
+      start: async () => {},
+      stop: async () => {},
+      sendMessage: async (_chatId, text) => {
+        sentTexts.push(text);
+      },
+      sendImage: async (_chatId, filePath) => {
+        sentImages.push(filePath);
+        throw { code: "unknown" };
+      },
+      listChats: async () => [],
+    };
+    manager.register(channel);
+
+    await manager.send("oc_test", "前文\n[IMAGE:/tmp/no-message.png]\n后文");
+
+    expect(sentImages).toEqual(["/tmp/no-message.png"]);
+    expect(sentTexts).toEqual([
+      "前文",
+      "图片发送失败: /tmp/no-message.png",
       "后文",
     ]);
   });

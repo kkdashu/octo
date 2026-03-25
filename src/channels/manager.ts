@@ -119,7 +119,13 @@ export class ChannelManager {
           await channel.sendImage(chatJid, part.value);
         } catch (err) {
           log.error(TAG, `Failed to send image to chat ${chatJid}`, err);
-          await channel.sendMessage(chatJid, `图片发送失败: ${part.value}`);
+          const errorMessage = err instanceof Error ? err.message.trim() : "";
+          await channel.sendMessage(
+            chatJid,
+            errorMessage
+              ? `图片发送失败: ${errorMessage}`
+              : `图片发送失败: ${part.value}`,
+          );
         }
       }
     } else {
