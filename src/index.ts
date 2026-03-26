@@ -10,6 +10,8 @@ import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
+import { createAdminApiRouter } from "./admin/api";
+import { DEFAULT_ADMIN_PORT, startAdminServer } from "./admin/server";
 
 const TAG = "main";
 
@@ -181,5 +183,14 @@ const groupQueue = new GroupQueue(db, channelManager, provider);
 await channelManager.startAll();
 startMessageLoop(db, channelManager, groupQueue);
 startScheduler(db, channelManager, groupQueue);
+
+// ---------------------------------------------------------------------------
+// 8. Start local admin UI
+// ---------------------------------------------------------------------------
+const adminPort = Number(process.env.ADMIN_PORT || DEFAULT_ADMIN_PORT);
+startAdminServer({
+  port: adminPort,
+  api: createAdminApiRouter(db),
+});
 
 log.info(TAG, `=== Octo started on port ${process.env.PORT || 3000} ===`);

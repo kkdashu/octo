@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3"
   },
   "scripts": {
     "start": "bun src/index.ts"
@@ -17,6 +19,8 @@
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@napi-rs/canvas": "^0.1.97",
     "cron-parser": "^5.5.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "zod": "^4.3.6"
   }
 }

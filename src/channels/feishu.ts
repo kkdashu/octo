@@ -356,44 +356,44 @@ export class FeishuChannel implements Channel {
 
   async start() {
     const config = this.config;
-    const eventDispatcher = this.eventDispatcher;
+    // const eventDispatcher = this.eventDispatcher;
 
-    this.server = Bun.serve({
-      port: config.port,
-      routes: {
-        [config.webhookPath]: {
-          POST: async (req: Request) => {
-            const body = (await req.json()) as Record<string, any>;
+    // this.server = Bun.serve({
+    //   port: config.port,
+    //   routes: {
+    //     [config.webhookPath]: {
+    //       POST: async (req: Request) => {
+    //         const body = (await req.json()) as Record<string, any>;
 
-            log.debug(TAG, "Webhook POST received", {
-              type: body.type,
-              hasChallenge: !!body.challenge,
-              hasEvent: !!body.event,
-              headers: Object.fromEntries(req.headers),
-              body,
-            });
+    //         log.debug(TAG, "Webhook POST received", {
+    //           type: body.type,
+    //           hasChallenge: !!body.challenge,
+    //           hasEvent: !!body.event,
+    //           headers: Object.fromEntries(req.headers),
+    //           body,
+    //         });
 
-            // Handle URL verification challenge
-            if (body.type === "url_verification") {
-              log.info(TAG, "URL verification challenge received, responding with challenge");
-              return Response.json({ challenge: body.challenge });
-            }
+    //         // Handle URL verification challenge
+    //         if (body.type === "url_verification") {
+    //           log.info(TAG, "URL verification challenge received, responding with challenge");
+    //           return Response.json({ challenge: body.challenge });
+    //         }
 
-            const data = {
-              headers: Object.fromEntries(req.headers),
-              body,
-            };
+    //         const data = {
+    //           headers: Object.fromEntries(req.headers),
+    //           body,
+    //         };
 
-            // Respond immediately, process asynchronously
-            eventDispatcher.invoke(data).catch((err: unknown) => {
-              log.error(TAG, "EventDispatcher.invoke() error", err);
-            });
+    //         // Respond immediately, process asynchronously
+    //         eventDispatcher.invoke(data).catch((err: unknown) => {
+    //           log.error(TAG, "EventDispatcher.invoke() error", err);
+    //         });
 
-            return new Response("OK", { status: 200 });
-          },
-        },
-      },
-    });
+    //         return new Response("OK", { status: 200 });
+    //       },
+    //     },
+    //   },
+    // });
 
     log.info(TAG, `Webhook server started on port ${config.port} at ${config.webhookPath}`);
   }

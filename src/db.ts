@@ -275,6 +275,32 @@ export function updateGroupProvider(
   ).run({ folder, provider });
 }
 
+export function updateGroupMetadata(
+  db: Database,
+  folder: string,
+  patch: {
+    name: string;
+    triggerPattern: string;
+    requiresTrigger: boolean;
+    agentProvider: string;
+  },
+) {
+  db.query(
+    `UPDATE registered_groups
+     SET name = $name,
+         trigger_pattern = $triggerPattern,
+         requires_trigger = $requiresTrigger,
+         agent_provider = $agentProvider
+     WHERE folder = $folder`,
+  ).run({
+    folder,
+    name: patch.name,
+    triggerPattern: patch.triggerPattern,
+    requiresTrigger: patch.requiresTrigger ? 1 : 0,
+    agentProvider: patch.agentProvider,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
