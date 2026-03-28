@@ -30,6 +30,13 @@
       "model": "kimi-k2.5",
       "codingPlanEnabled": true,
       "provider": "moonshot"
+    },
+    "minimax": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "apiKeyEnv": "MINIMAX_API_KEY",
+      "model": "MiniMax-M2.7",
+      "provider": "minimax"
     }
   }
 }

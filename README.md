@@ -5,7 +5,7 @@
 ## 特性
 
 - 统一 runtime：所有群组都走 `ClaudeProvider`
-- 多 profile 路由：`claude`、`codex`、`kimi`、`kimi-cli`
+- 多 profile 路由：`claude`、`codex`、`kimi`、`kimi-cli`、`minimax`
 - 多群隔离：独立工作目录、独立 session、独立技能
 - 统一工具：全部通过 Claude SDK 进程内 MCP 接入
 - 会话恢复：群组切换 profile 不再清 session
@@ -31,7 +31,7 @@
 ```bash
 bun install
 cp env.example .env
-# 编辑 .env，填入飞书凭证和各线路 API Key
+# 编辑 .env，填入飞书凭证和各线路 API Key（Anthropic / OpenAI / Moonshot / MiniMax）
 
 bun run start
 ```
@@ -47,6 +47,11 @@ Moonshot/Kimi 线路说明：
 - `kimi`：走 `https://api.moonshot.cn/anthropic`
 - `kimi-cli`：走 `https://api.kimi.com/coding`
 - 这两条线路都以 Anthropic 兼容模式直连 Claude Agent SDK，不经过本地 OpenAI 兼容 proxy
+
+MiniMax 线路说明：
+
+- `minimax`：走 `https://api.minimaxi.com/anthropic`
+- `minimax` 以 Anthropic 兼容模式直连 Claude Agent SDK，不经过本地 OpenAI 兼容 proxy
 - 本地 OpenAI 兼容 proxy 只用于真正的 OpenAI 格式 profile，例如 `codex`
 
 ## 切换线路
@@ -62,7 +67,7 @@ Moonshot/Kimi 线路说明：
 sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-cli' WHERE folder = 'xxx';"
 ```
 
-这里的 `agent_provider` 现在表示 profile key，不再表示底层 SDK 类型。
+这里的 `agent_provider` 现在表示 profile key，不再表示底层 SDK 类型，例如可以切到 `minimax`。
 
 ## 配置文件
 
@@ -99,6 +104,13 @@ sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-c
       "model": "kimi-k2.5",
       "codingPlanEnabled": true,
       "provider": "moonshot"
+    },
+    "minimax": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "apiKeyEnv": "MINIMAX_API_KEY",
+      "model": "MiniMax-M2.7",
+      "provider": "minimax"
     }
   }
 }

@@ -30,6 +30,13 @@ function createWorkspace() {
           apiKeyEnv: "OPENAI_API_KEY",
           model: "gpt-5.4",
         },
+        minimax: {
+          apiFormat: "anthropic",
+          baseUrl: "https://api.minimaxi.com/anthropic",
+          apiKeyEnv: "MINIMAX_API_KEY",
+          model: "MiniMax-M2.7",
+          provider: "minimax",
+        },
       },
     }),
     "utf-8",
@@ -85,7 +92,11 @@ describe("admin api router", () => {
 
     expect(response.status).toBe(200);
     expect(payload.groups[0]?.folder).toBe("test-group");
-    expect(payload.availableProfiles.map((profile) => profile.profileKey)).toEqual(["claude", "codex"]);
+    expect(payload.availableProfiles.map((profile) => profile.profileKey)).toEqual([
+      "claude",
+      "codex",
+      "minimax",
+    ]);
   });
 
   test("updates group metadata and rejects unknown profiles", async () => {
@@ -102,7 +113,7 @@ describe("admin api router", () => {
           name: "Renamed Group",
           triggerPattern: "@octo",
           requiresTrigger: false,
-          agentProvider: "codex",
+          agentProvider: "minimax",
         }),
       }),
       { folder: "test-group" },
@@ -113,7 +124,7 @@ describe("admin api router", () => {
     expect(updated?.name).toBe("Renamed Group");
     expect(updated?.trigger_pattern).toBe("@octo");
     expect(updated?.requires_trigger).toBe(0);
-    expect(updated?.agent_provider).toBe("codex");
+    expect(updated?.agent_provider).toBe("minimax");
 
     const invalidResponse = await router.patchGroup(withParams(
       new Request("http://localhost/api/admin/groups/test-group", {
