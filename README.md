@@ -8,6 +8,7 @@
 - 多 profile 路由：`claude`、`codex`、`kimi`、`kimi-cli`、`minimax`
 - 多群隔离：独立工作目录、独立 session、独立技能
 - 统一工具：全部通过 Claude SDK 进程内 MCP 接入
+- MiniMax 文生图：通过 `generate_image` 生成本地图片，再复用 `send_image` 发送
 - 会话恢复：群组切换 profile 不再清 session
 - 定时任务与技能安装：沿用现有工具体系
 
@@ -52,6 +53,9 @@ MiniMax 线路说明：
 
 - `minimax`：走 `https://api.minimaxi.com/anthropic`
 - `minimax` 以 Anthropic 兼容模式直连 Claude Agent SDK，不经过本地 OpenAI 兼容 proxy
+- `generate_image` 工具会直接调用 `https://api.minimaxi.com/v1/image_generation`
+- 文生图工具与当前群 `agent_provider` 无关，只要求配置了 `MINIMAX_API_KEY`
+- 生成后的图片会保存到当前群目录 `.generated/images/`，再由 `send_image` 发送
 - 本地 OpenAI 兼容 proxy 只用于真正的 OpenAI 格式 profile，例如 `codex`
 
 ## 切换线路
