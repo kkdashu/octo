@@ -11,6 +11,11 @@ import {
   updateGroupProvider,
 } from "./db";
 import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
+import {
+  generateMiniMaxImage,
+  MINIMAX_IMAGE_ASPECT_RATIOS,
+  MINIMAX_IMAGE_MODELS,
+} from "./runtime/minimax-image";
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
@@ -24,6 +29,38 @@ export interface MessageSender {
   sendImage(chatJid: string, filePath: string): Promise<void>;
   refreshGroupMetadata(): Promise<{ count: number }>;
   clearSession?(groupFolder: string): Promise<{ closedActiveSession: boolean; sessionId: string }>;
+}
+
+type ResolveTargetChatResult =
+  | { ok: true; chatJid: string }
+  | { ok: false; message: string };
+
+function resolveTargetChatJid(
+  db: Database,
+  groupFolder: string,
+  isMain: boolean,
+  requestedChatJid: unknown,
+): ResolveTargetChatResult {
+  const group = getGroupByFolder(db, groupFolder);
+  if (!group) {
+    return { ok: false, message: `Group not found: ${groupFolder}` };
+  }
+
+  const normalizedRequestedChatJid =
+    typeof requestedChatJid === "string" ? requestedChatJid.trim() : "";
+  const targetChatJid = normalizedRequestedChatJid || group.jid;
+
+  if (!isMain && targetChatJid !== group.jid) {
+    return {
+      ok: false,
+      message: "Permission denied: cannot send to other groups",
+    };
+  }
+
+  return {
+    ok: true,
+    chatJid: targetChatJid,
+  };
 }
 
 export function createGroupToolDefs(
@@ -47,25 +84,31 @@ export function createGroupToolDefs(
       schema: {
         type: "object",
         properties: {
-          chatJid: { type: "string", description: "Target chat ID" },
+          chatJid: {
+            type: "string",
+            description: "Optional target chat ID. Omit it to send back to the current group.",
+          },
           text: { type: "string", description: "Message content" },
         },
-        required: ["chatJid", "text"],
+        required: ["text"],
       },
       handler: async (args) => {
+        const resolvedTarget = resolveTargetChatJid(db, groupFolder, isMain, args.chatJid);
         log.info(TAG, `[send_message] called by group ${groupFolder}`, {
-          chatJid: args.chatJid,
+          requestedChatJid: args.chatJid,
+          resolvedChatJid: resolvedTarget.ok ? resolvedTarget.chatJid : null,
           textLength: (args.text as string).length,
           textPreview: (args.text as string).substring(0, 100),
         });
-        if (!isMain) {
-          const group = getGroupByFolder(db, groupFolder);
-          if (group && args.chatJid !== group.jid) {
-            log.warn(TAG, `[send_message] Permission denied: ${groupFolder} tried to send to ${args.chatJid}`);
-            return { content: [{ type: "text", text: "Permission denied: cannot send to other groups" }] };
-          }
+        if (!resolvedTarget.ok) {
+          log.warn(TAG, `[send_message] Rejected target chat`, {
+            groupFolder,
+            requestedChatJid: args.chatJid,
+            message: resolvedTarget.message,
+          });
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
         }
-        await sender.send(args.chatJid as string, args.text as string);
+        await sender.send(resolvedTarget.chatJid, args.text as string);
         log.info(TAG, `[send_message] Message sent successfully`);
         return { content: [{ type: "text", text: "Message sent" }] };
       },
@@ -76,22 +119,28 @@ export function createGroupToolDefs(
       schema: {
         type: "object",
         properties: {
-          chatJid: { type: "string", description: "Target chat ID" },
+          chatJid: {
+            type: "string",
+            description: "Optional target chat ID. Omit it to send back to the current group.",
+          },
           filePath: { type: "string", description: "Image file path, relative to current group working directory" },
         },
-        required: ["chatJid", "filePath"],
+        required: ["filePath"],
       },
       handler: async (args) => {
+        const resolvedTarget = resolveTargetChatJid(db, groupFolder, isMain, args.chatJid);
         log.info(TAG, `[send_image] called by group ${groupFolder}`, {
-          chatJid: args.chatJid,
+          requestedChatJid: args.chatJid,
+          resolvedChatJid: resolvedTarget.ok ? resolvedTarget.chatJid : null,
           filePath: args.filePath,
         });
-        if (!isMain) {
-          const group = getGroupByFolder(db, groupFolder);
-          if (group && args.chatJid !== group.jid) {
-            log.warn(TAG, `[send_image] Permission denied: ${groupFolder} tried to send image to ${args.chatJid}`);
-            return { content: [{ type: "text", text: "Permission denied: cannot send to other groups" }] };
-          }
+        if (!resolvedTarget.ok) {
+          log.warn(TAG, `[send_image] Rejected target chat`, {
+            groupFolder,
+            requestedChatJid: args.chatJid,
+            message: resolvedTarget.message,
+          });
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
         }
 
         const groupWorkdir = resolve(root, "groups", groupFolder);
@@ -111,9 +160,93 @@ export function createGroupToolDefs(
           return { content: [{ type: "text", text: `Not a file: ${args.filePath}` }] };
         }
 
-        await sender.sendImage(args.chatJid as string, absoluteFilePath);
-        log.info(TAG, `[send_image] Image sent successfully`, { chatJid: args.chatJid, filePath: absoluteFilePath });
+        await sender.sendImage(resolvedTarget.chatJid, absoluteFilePath);
+        log.info(TAG, `[send_image] Image sent successfully`, {
+          chatJid: resolvedTarget.chatJid,
+          filePath: absoluteFilePath,
+        });
         return { content: [{ type: "text", text: "Image sent" }] };
+      },
+    },
+    {
+      name: "generate_image",
+      description: "Generate an image from a text prompt using MiniMax and save it into the current group directory",
+      schema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Text prompt for the image" },
+          model: {
+            type: "string",
+            enum: [...MINIMAX_IMAGE_MODELS],
+            default: "image-01",
+            description: "MiniMax image model",
+          },
+          aspectRatio: {
+            type: "string",
+            enum: [...MINIMAX_IMAGE_ASPECT_RATIOS],
+            default: "1:1",
+            description: "Output aspect ratio",
+          },
+        },
+        required: ["prompt"],
+      },
+      handler: async (args) => {
+        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+        const requestedModel = typeof args.model === "string" ? args.model : "image-01";
+        const requestedAspectRatio = typeof args.aspectRatio === "string" ? args.aspectRatio : "1:1";
+        const model = MINIMAX_IMAGE_MODELS.includes(
+          requestedModel as (typeof MINIMAX_IMAGE_MODELS)[number],
+        )
+          ? (requestedModel as (typeof MINIMAX_IMAGE_MODELS)[number])
+          : "image-01";
+        const aspectRatio = MINIMAX_IMAGE_ASPECT_RATIOS.includes(
+          requestedAspectRatio as (typeof MINIMAX_IMAGE_ASPECT_RATIOS)[number],
+        )
+          ? (requestedAspectRatio as (typeof MINIMAX_IMAGE_ASPECT_RATIOS)[number])
+          : "1:1";
+
+        log.info(TAG, `[generate_image] called by group ${groupFolder}`, {
+          model,
+          aspectRatio,
+          promptLength: prompt.length,
+        });
+
+        if (!prompt) {
+          return { content: [{ type: "text", text: "Prompt is required for image generation." }] };
+        }
+
+        try {
+          const artifact = await generateMiniMaxImage({
+            groupWorkdir: resolve(root, "groups", groupFolder),
+            prompt,
+            model,
+            aspectRatio,
+          });
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    ok: true,
+                    model: artifact.model,
+                    aspectRatio: artifact.aspectRatio,
+                    filePath: artifact.relativeFilePath,
+                    message:
+                      "Image generated successfully. Use send_image with this filePath to post it to the group.",
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        } catch (err) {
+          log.error(TAG, `[generate_image] failed for group ${groupFolder}`, err);
+          const message = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text", text: `Failed to generate image: ${message}` }] };
+        }
       },
     },
     {

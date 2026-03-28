@@ -57,7 +57,9 @@ Main group has access to these MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| `mcp__octo-tools__send_message` | Send message to any group |
+| `mcp__octo-tools__send_message` | Send message to the current group by default, or any group when `chatJid` is explicitly provided |
+| `mcp__octo-tools__send_image` | Send image to the current group by default, or any group when `chatJid` is explicitly provided |
+| `mcp__octo-tools__generate_image` | Generate an image with MiniMax and save it inside the current group directory |
 | `mcp__octo-tools__schedule_task` | Create scheduled task for this group |
 | `mcp__octo-tools__list_tasks` | List scheduled tasks |
 | `mcp__octo-tools__pause_task` | Pause a task |
@@ -67,6 +69,9 @@ Main group has access to these MCP tools:
 | `mcp__octo-tools__register_group` | Register a new group |
 | `mcp__octo-tools__refresh_groups` | Refresh group metadata from Feishu |
 | `mcp__octo-tools__cross_group_schedule_task` | Create task for another group |
+
+When replying to the current group, omit `chatJid`.
+Only provide `chatJid` when you intentionally want to send to another group.
 
 ## Key Paths
 

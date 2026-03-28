@@ -43,8 +43,9 @@ When calling tools that require `groupFolder`, use the name of your current work
 
 | Tool | Description |
 |------|-------------|
-| `send_message` | Send message to a chat group |
-| `send_image` | Send image to a chat group |
+| `send_message` | Send message to the current group by default, or another group if explicitly allowed |
+| `send_image` | Send an image to the current group by default, or another group if explicitly allowed |
+| `generate_image` | Generate an image with MiniMax and save it inside the current group directory |
 | `schedule_task` | Create scheduled task |
 | `list_tasks` | List scheduled tasks |
 | `pause_task` | Pause a task |
@@ -52,6 +53,9 @@ When calling tools that require `groupFolder`, use the name of your current work
 | `cancel_task` | Cancel a task |
 | `list_groups` | List all registered groups |
 | `switch_provider` | Switch AI provider for a group |
+
+When replying to the current group, omit `chatJid`.
+Only provide `chatJid` if you intentionally want to target a different group and the tool permissions allow it.
 
 ## Formatting
 
