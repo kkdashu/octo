@@ -6,6 +6,11 @@ import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
 import { ClaudeProvider } from "./providers/claude";
 import { AnthropicLoggingProxyManager } from "./runtime/anthropic-logging-proxy";
+import { DatabaseImageMessagePreprocessor } from "./runtime/image-message-preprocessor";
+import {
+  MiniMaxTokenPlanMcpClient,
+  resolveMiniMaxTokenPlanMcpConfig,
+} from "./runtime/minimax-token-plan-mcp";
 import { OpenAIProxyManager } from "./runtime/openai-proxy";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
@@ -172,7 +177,20 @@ const proxyManager = new OpenAIProxyManager();
 await proxyManager.start();
 const anthropicLoggingProxyManager = new AnthropicLoggingProxyManager();
 await anthropicLoggingProxyManager.start();
-const provider = new ClaudeProvider(proxyManager, anthropicLoggingProxyManager);
+const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
+if (!minimaxTokenPlanConfig.apiKey) {
+  log.warn(TAG, "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders");
+}
+const minimaxTokenPlanClient = new MiniMaxTokenPlanMcpClient(minimaxTokenPlanConfig);
+const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
+  analyzeImage: minimaxTokenPlanClient,
+  db,
+});
+const provider = new ClaudeProvider(
+  proxyManager,
+  anthropicLoggingProxyManager,
+  imageMessagePreprocessor,
+);
 log.info(TAG, "Unified Claude runtime initialized");
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,13 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { resolve } from "node:path";
 import { z } from "zod";
 
 import { log } from "../logger";
+import { normalizeLegacyImageSyntax } from "../message-parts";
 import { AnthropicLoggingProxyManager } from "../runtime/anthropic-logging-proxy";
+import type { ImageMessagePreprocessor } from "../runtime/image-message-preprocessor";
 import { buildClaudeSdkEnv } from "../runtime/profile-config";
 import { OpenAIProxyManager } from "../runtime/openai-proxy";
 import type {
@@ -21,10 +24,33 @@ const TAG = "claude-provider";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeUserMessage(content: string): SDKUserMessage {
+async function makeUserMessage(
+  text: string,
+  rootDir: string,
+  imageMessagePreprocessor: ImageMessagePreprocessor,
+): Promise<SDKUserMessage> {
+  let processedContent = normalizeLegacyImageSyntax(text);
+
+  try {
+    processedContent = await imageMessagePreprocessor.preprocess(text, rootDir);
+  } catch (error) {
+    log.error(TAG, "Image preprocessing failed, falling back to normalized text", {
+      rootDir,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (error instanceof Error) {
+      log.error(TAG, "Image preprocessing error details", error);
+    }
+  }
+
+  const message = {
+    role: "user" as const,
+    content: processedContent,
+  } as SDKUserMessage["message"];
+
   return {
     type: "user",
-    message: { role: "user", content },
+    message,
     parent_tool_use_id: null,
     session_id: "",
   };
@@ -98,6 +124,7 @@ export class ClaudeProvider implements AgentProvider {
   constructor(
     private readonly openAIProxyManager: OpenAIProxyManager,
     private readonly anthropicLoggingProxyManager: AnthropicLoggingProxyManager,
+    private readonly imageMessagePreprocessor: ImageMessagePreprocessor,
   ) {}
 
   async clearContext(config: SessionConfig): Promise<{
@@ -149,6 +176,7 @@ export class ClaudeProvider implements AgentProvider {
     events: AsyncIterable<AgentEvent>;
   }> {
     const groupWorkdir = config.workingDirectory;
+    const projectRoot = resolve(groupWorkdir, "..", "..");
 
     log.info(TAG, `=== Starting session for group: ${config.groupFolder} ===`, {
       groupFolder: config.groupFolder,
@@ -163,9 +191,14 @@ export class ClaudeProvider implements AgentProvider {
     // Build message channel (async generator for streaming input)
     let resolveNext: ((msg: string | null) => void) | null = null;
     const queue: (string | null)[] = [];
+    const imageMessagePreprocessor = this.imageMessagePreprocessor;
 
     async function* messageGenerator(initialPrompt: string) {
-      yield makeUserMessage(initialPrompt);
+      yield await makeUserMessage(
+        initialPrompt,
+        projectRoot,
+        imageMessagePreprocessor,
+      );
       while (true) {
         const msg =
           queue.length > 0
@@ -175,7 +208,11 @@ export class ClaudeProvider implements AgentProvider {
               });
         resolveNext = null;
         if (msg === null) return;
-        yield makeUserMessage(msg);
+        yield await makeUserMessage(
+          msg,
+          projectRoot,
+          imageMessagePreprocessor,
+        );
       }
     }
 
@@ -280,3 +317,7 @@ export class ClaudeProvider implements AgentProvider {
     };
   }
 }
+
+export const __test__ = {
+  makeUserMessage,
+};

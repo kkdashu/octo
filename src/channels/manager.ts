@@ -2,51 +2,18 @@ import type { Database } from "bun:sqlite";
 import type { Channel, ChatInfo } from "./types";
 import { getGroupByJid } from "../db";
 import { log } from "../logger";
+import {
+  normalizeLegacyImageSyntax,
+  parseMessageParts,
+  type MessagePart,
+} from "../message-parts";
 
 const TAG = "channel-mgr";
 
-export type OutgoingMessagePart =
-  | { type: "text"; value: string }
-  | { type: "image"; value: string };
-
-const OUTGOING_IMAGE_TAG_RE = /\[IMAGE:([^\]]+)\]|!\[[^\]]*\]\(([^)\n]+)\)/g;
+export type OutgoingMessagePart = MessagePart;
 
 export function parseOutgoingMessageParts(text: string): OutgoingMessagePart[] {
-  if (!text) {
-    return [];
-  }
-
-  const parts: OutgoingMessagePart[] = [];
-  let lastIndex = 0;
-
-  for (const match of text.matchAll(OUTGOING_IMAGE_TAG_RE)) {
-    const start = match.index ?? 0;
-    if (start > lastIndex) {
-      parts.push({
-        type: "text",
-        value: text.slice(lastIndex, start),
-      });
-    }
-
-    const imagePath = (match[1] ?? match[2] ?? "").trim();
-    if (imagePath) {
-      parts.push({
-        type: "image",
-        value: imagePath,
-      });
-    }
-
-    lastIndex = start + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push({
-      type: "text",
-      value: text.slice(lastIndex),
-    });
-  }
-
-  return parts;
+  return parseMessageParts(normalizeLegacyImageSyntax(text));
 }
 
 export class ChannelManager {
@@ -88,20 +55,21 @@ export class ChannelManager {
     });
     const channel = this.getChannelForChat(chatJid);
     if (channel) {
+      const normalizedText = normalizeLegacyImageSyntax(text);
       const parts = parseOutgoingMessageParts(text);
       const hasImages = parts.some((part) => part.type === "image");
 
       if (!hasImages) {
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, normalizedText);
         return;
       }
 
       if (!channel.sendImage) {
         log.warn(TAG, `Channel ${channel.type} does not support image sending, falling back to raw text`, {
           chatJid,
-          textPreview: text.substring(0, 200),
+          textPreview: normalizedText.substring(0, 200),
         });
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, normalizedText);
         return;
       }
 

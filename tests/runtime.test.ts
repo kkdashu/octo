@@ -9,6 +9,10 @@ import {
   listAgentProfiles,
   resolveAgentProfile,
 } from "../src/runtime/profile-config";
+import {
+  __test__ as minimaxMcpTestHelpers,
+  resolveMiniMaxTokenPlanMcpConfig,
+} from "../src/runtime/minimax-token-plan-mcp";
 import { anthropicToOpenAI, openAIToAnthropic } from "../src/runtime/openai-transform";
 import { __test__ as proxyTestHelpers } from "../src/runtime/openai-proxy";
 
@@ -415,5 +419,57 @@ describe("claude session resume validation", () => {
     );
 
     expect(resumeSessionId).toBeUndefined();
+  });
+});
+
+describe("minimax token plan mcp config", () => {
+  test("uses default host and command when env overrides are absent", () => {
+    const config = resolveMiniMaxTokenPlanMcpConfig({
+      MINIMAX_API_KEY: "minimax-key",
+    });
+
+    expect(config).toEqual({
+      apiKey: "minimax-key",
+      apiHost: minimaxMcpTestHelpers.DEFAULT_MINIMAX_API_HOST,
+      command: minimaxMcpTestHelpers.DEFAULT_MINIMAX_MCP_COMMAND,
+      args: [...minimaxMcpTestHelpers.DEFAULT_MINIMAX_MCP_ARGS],
+    });
+  });
+
+  test("supports explicit host and uvx command overrides", () => {
+    const config = resolveMiniMaxTokenPlanMcpConfig({
+      MINIMAX_API_KEY: "minimax-key",
+      MINIMAX_API_HOST: "https://api.internal.minimax.example",
+      MINIMAX_MCP_COMMAND: "/opt/homebrew/bin/uvx",
+    });
+
+    expect(config).toEqual({
+      apiKey: "minimax-key",
+      apiHost: "https://api.internal.minimax.example",
+      command: "/opt/homebrew/bin/uvx",
+      args: [...minimaxMcpTestHelpers.DEFAULT_MINIMAX_MCP_ARGS],
+    });
+  });
+
+  test("extracts text blocks from MiniMax tool output", () => {
+    const text = minimaxMcpTestHelpers.extractToolTextContent([
+      { type: "text", text: "客观描述: 白猫" },
+      { type: "resource", resource: { text: "OCR文本: 无" } },
+      { type: "image" },
+    ]);
+
+    expect(text).toBe("客观描述: 白猫\nOCR文本: 无");
+  });
+
+  test("builds understand_image tool args with image_source", () => {
+    const args = minimaxMcpTestHelpers.buildUnderstandImageToolArguments({
+      prompt: "describe this image",
+      imagePath: "/tmp/cat.png",
+    });
+
+    expect(args).toEqual({
+      prompt: "describe this image",
+      image_source: "/tmp/cat.png",
+    });
   });
 });
