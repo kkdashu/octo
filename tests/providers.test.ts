@@ -2,17 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClaudeProvider } from "../src/providers/claude";
+import { ClaudeProvider, __test__ as claudeProviderTestHelpers } from "../src/providers/claude";
 import { initDatabase, registerGroup } from "../src/db";
 import { AnthropicLoggingProxyManager } from "../src/runtime/anthropic-logging-proxy";
 import { OpenAIProxyManager } from "../src/runtime/openai-proxy";
 import type { AgentEvent, AgentProvider, SessionConfig } from "../src/providers/types";
+
+const passthroughImagePreprocessor = {
+  preprocess: async (text: string) => text,
+};
 
 describe("Provider interface compliance", () => {
   test("ClaudeProvider implements AgentProvider", () => {
     const provider = new ClaudeProvider(
       new OpenAIProxyManager(),
       new AnthropicLoggingProxyManager(),
+      passthroughImagePreprocessor,
     );
     expect(provider.name).toBe("claude");
     expect(typeof provider.startSession).toBe("function");
@@ -361,5 +366,74 @@ describe("Tool definitions", () => {
       "mcp__octo-tools__send_image",
       "mcp__octo-tools__generate_image",
     ]);
+  });
+});
+
+describe("Claude provider markdown image content", () => {
+  test("uses preprocessed pure text content instead of Read instructions", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-images-"));
+
+    try {
+      const message = await claudeProviderTestHelpers.makeUserMessage(
+        "前文\n![image](media/oc_test/om_test.png)\n后文",
+        workspaceDir,
+        {
+          preprocess: async (text: string, rootDir: string) => {
+            expect(rootDir).toBe(workspaceDir);
+            expect(text).toBe("前文\n![image](media/oc_test/om_test.png)\n后文");
+
+            return [
+              "前文",
+              "[图片理解结果]",
+              "路径: media/oc_test/om_test.png",
+              "客观描述: 一只白猫趴着",
+              "OCR文本: 无",
+              "关键信息: 无票据或聊天界面",
+              "[/图片理解结果]",
+              "后文",
+            ].join("\n");
+          },
+        },
+      );
+
+      expect(message.message.content).toBe(
+        [
+          "前文",
+          "[图片理解结果]",
+          "路径: media/oc_test/om_test.png",
+          "客观描述: 一只白猫趴着",
+          "OCR文本: 无",
+          "关键信息: 无票据或聊天界面",
+          "[/图片理解结果]",
+          "后文",
+        ].join("\n"),
+      );
+      expect(message.message.content).not.toContain("Read");
+      expect(message.message.content).not.toContain("[图片路径:");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to normalized markdown when preprocessing throws", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-images-"));
+
+    try {
+      const message = await claudeProviderTestHelpers.makeUserMessage(
+        "旧格式图片：[IMAGE:media/oc_test/om_legacy.png]",
+        workspaceDir,
+        {
+          preprocess: async () => {
+            throw new Error("preprocess failed");
+          },
+        },
+      );
+
+      expect(message.message.content).toBe(
+        "旧格式图片：![image](media/oc_test/om_legacy.png)",
+      );
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });

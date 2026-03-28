@@ -161,7 +161,9 @@ describe("ChannelManager outgoing rich message handling", () => {
     const rawText = "当前画面：\n\n[IMAGE:/tmp/screen_unlock.png]\n\n继续处理";
     await manager.send("oc_test", rawText);
 
-    expect(sentTexts).toEqual([rawText]);
+    expect(sentTexts).toEqual([
+      "当前画面：\n\n![image](/tmp/screen_unlock.png)\n\n继续处理",
+    ]);
   });
 
   test("continues after image send failure and emits fallback text", async () => {

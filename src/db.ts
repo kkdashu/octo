@@ -48,6 +48,18 @@ export function initDatabase(dbPath: string): Database {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS image_understanding_cache (
+      cache_key TEXT PRIMARY KEY,
+      image_path TEXT NOT NULL,
+      file_sha256 TEXT NOT NULL,
+      prompt_version TEXT NOT NULL,
+      analysis_text TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -127,6 +139,16 @@ export interface ScheduledTask {
   last_result: string | null;
   status: string;
   created_at: string;
+}
+
+export interface ImageUnderstandingCacheRow {
+  cache_key: string;
+  image_path: string;
+  file_sha256: string;
+  prompt_version: string;
+  analysis_text: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +355,60 @@ export function deleteSessionId(
   db.query(
     "DELETE FROM sessions WHERE group_folder = $groupFolder",
   ).run({ groupFolder: folder });
+}
+
+// ---------------------------------------------------------------------------
+// Image understanding cache
+// ---------------------------------------------------------------------------
+
+export function getImageUnderstandingCache(
+  db: Database,
+  cacheKey: string,
+): ImageUnderstandingCacheRow | null {
+  return (
+    (db
+      .query("SELECT * FROM image_understanding_cache WHERE cache_key = $cacheKey")
+      .get({ cacheKey }) as ImageUnderstandingCacheRow | null) ?? null
+  );
+}
+
+export function upsertImageUnderstandingCache(
+  db: Database,
+  row: ImageUnderstandingCacheRow,
+) {
+  db.query(
+    `INSERT INTO image_understanding_cache (
+       cache_key,
+       image_path,
+       file_sha256,
+       prompt_version,
+       analysis_text,
+       created_at,
+       updated_at
+     ) VALUES (
+       $cacheKey,
+       $imagePath,
+       $fileSha256,
+       $promptVersion,
+       $analysisText,
+       $createdAt,
+       $updatedAt
+     )
+     ON CONFLICT(cache_key) DO UPDATE SET
+       image_path = $imagePath,
+       file_sha256 = $fileSha256,
+       prompt_version = $promptVersion,
+       analysis_text = $analysisText,
+       updated_at = $updatedAt`,
+  ).run({
+    cacheKey: row.cache_key,
+    imagePath: row.image_path,
+    fileSha256: row.file_sha256,
+    promptVersion: row.prompt_version,
+    analysisText: row.analysis_text,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
 }
 
 // ---------------------------------------------------------------------------
