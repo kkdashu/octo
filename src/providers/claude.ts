@@ -4,6 +4,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
 import { log } from "../logger";
+import { AnthropicLoggingProxyManager } from "../runtime/anthropic-logging-proxy";
 import { buildClaudeSdkEnv } from "../runtime/profile-config";
 import { OpenAIProxyManager } from "../runtime/openai-proxy";
 import type {
@@ -94,15 +95,18 @@ function jsonSchemaToZod(schema: Record<string, unknown>): Record<string, z.ZodT
 export class ClaudeProvider implements AgentProvider {
   readonly name = "claude";
 
-  constructor(private readonly proxyManager: OpenAIProxyManager) {}
+  constructor(
+    private readonly openAIProxyManager: OpenAIProxyManager,
+    private readonly anthropicLoggingProxyManager: AnthropicLoggingProxyManager,
+  ) {}
 
   async clearContext(config: SessionConfig): Promise<{
     sessionId: string;
   }> {
     const proxyRoute =
       config.profile.apiFormat === "openai"
-        ? this.proxyManager.acquire(config.profile)
-        : undefined;
+        ? this.openAIProxyManager.acquire(config.profile, config.groupFolder)
+        : this.anthropicLoggingProxyManager.acquire(config.profile, config.groupFolder);
     const env = buildClaudeSdkEnv(config.profile, proxyRoute);
 
     try {
@@ -196,8 +200,8 @@ export class ClaudeProvider implements AgentProvider {
 
     const proxyRoute =
       config.profile.apiFormat === "openai"
-        ? this.proxyManager.acquire(config.profile)
-        : undefined;
+        ? this.openAIProxyManager.acquire(config.profile, config.groupFolder)
+        : this.anthropicLoggingProxyManager.acquire(config.profile, config.groupFolder);
     const env = buildClaudeSdkEnv(config.profile, proxyRoute);
 
     log.info(TAG, "Agent configuration", {

@@ -4,12 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeProvider } from "../src/providers/claude";
 import { initDatabase, registerGroup } from "../src/db";
+import { AnthropicLoggingProxyManager } from "../src/runtime/anthropic-logging-proxy";
 import { OpenAIProxyManager } from "../src/runtime/openai-proxy";
 import type { AgentEvent, AgentProvider, SessionConfig } from "../src/providers/types";
 
 describe("Provider interface compliance", () => {
   test("ClaudeProvider implements AgentProvider", () => {
-    const provider = new ClaudeProvider(new OpenAIProxyManager());
+    const provider = new ClaudeProvider(
+      new OpenAIProxyManager(),
+      new AnthropicLoggingProxyManager(),
+    );
     expect(provider.name).toBe("claude");
     expect(typeof provider.startSession).toBe("function");
     expect(typeof provider.clearContext).toBe("function");

@@ -5,6 +5,7 @@ import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
 import { ClaudeProvider } from "./providers/claude";
+import { AnthropicLoggingProxyManager } from "./runtime/anthropic-logging-proxy";
 import { OpenAIProxyManager } from "./runtime/openai-proxy";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
@@ -169,7 +170,9 @@ for (const group of listGroups(db)) {
 // ---------------------------------------------------------------------------
 const proxyManager = new OpenAIProxyManager();
 await proxyManager.start();
-const provider = new ClaudeProvider(proxyManager);
+const anthropicLoggingProxyManager = new AnthropicLoggingProxyManager();
+await anthropicLoggingProxyManager.start();
+const provider = new ClaudeProvider(proxyManager, anthropicLoggingProxyManager);
 log.info(TAG, "Unified Claude runtime initialized");
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   type OpenAIStreamChunk,
 } from "./openai-transform";
 import { log } from "../logger";
+import { writeModelLog } from "./model-logger";
 import type { ProxyRouteHandle, ResolvedAgentProfile, UpstreamApiType } from "./types";
 
 const TAG = "openai-proxy";
@@ -16,6 +17,7 @@ type OpenAIProxyRoute = {
   routeId: string;
   apiKey: string;
   upstream: ResolvedAgentProfile;
+  groupFolder: string;
 };
 
 type ToolCallState = {
@@ -62,6 +64,16 @@ const GEMINI_FALLBACK_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 const toolCallExtraContentById = new Map<string, unknown>();
 const MAX_TOOL_CALL_EXTRA_CONTENT_CACHE = 1024;
 
+type ModelLogContext = {
+  requestId: string;
+  groupFolder: string;
+  upstream: ResolvedAgentProfile;
+  url: string;
+  method: string;
+  stream: boolean;
+  status?: number;
+};
+
 function toOptionalObject(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -93,6 +105,46 @@ function stringifyUnknown(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+function parseJSONOrText(raw: string): unknown {
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function writeOpenAIProxyLog(
+  context: ModelLogContext,
+  stage: 'sdk_request' | 'upstream_request' | 'upstream_response' | 'upstream_stream_chunk' | 'proxy_response' | 'error',
+  options: {
+    headers?: unknown;
+    body?: unknown;
+    meta?: Record<string, unknown>;
+    status?: number;
+  } = {},
+): void {
+  writeModelLog({
+    requestId: context.requestId,
+    routeType: 'openai_proxy',
+    stage,
+    profileKey: context.upstream.profileKey,
+    provider: context.upstream.provider,
+    model: context.upstream.model,
+    groupFolder: context.groupFolder,
+    url: context.url,
+    method: context.method,
+    status: options.status ?? context.status,
+    stream: context.stream,
+    headers: options.headers as Record<string, unknown> | undefined,
+    body: options.body,
+    meta: options.meta,
+  });
 }
 
 function createTextDecoder(encoding: string, fatal: boolean): TextDecoder {
@@ -1551,7 +1603,8 @@ function processResponsesStreamEvent(
 
 async function handleResponsesStreamResponse(
   upstreamResponse: Response,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  logContext: ModelLogContext,
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1572,6 +1625,7 @@ async function handleResponsesStreamResponse(
 
   let buffer = '';
   let sawDoneMarker = false;
+  let chunkIndex = 0;
 
   const flushDone = () => {
     if (!state.hasMessageStart) return;
@@ -1600,6 +1654,16 @@ async function handleResponsesStreamResponse(
         continue;
       }
 
+      writeOpenAIProxyLog(logContext, 'upstream_stream_chunk', {
+        headers: upstreamResponse.headers,
+        body: packet,
+        meta: {
+          chunkIndex,
+          event: parsedPacket.event || 'message',
+        },
+      });
+      chunkIndex += 1;
+
       if (payload === '[DONE]') {
         flushDone();
         sawDoneMarker = true;
@@ -1624,12 +1688,21 @@ async function handleResponsesStreamResponse(
   }
 
   flushDone();
+  writeOpenAIProxyLog(logContext, 'upstream_response', {
+    headers: upstreamResponse.headers,
+    status: upstreamResponse.status,
+    meta: {
+      chunkCount: chunkIndex,
+      done: true,
+    },
+  });
   res.end();
 }
 
 async function handleChatCompletionsStreamResponse(
   upstreamResponse: Response,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  logContext: ModelLogContext,
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1649,6 +1722,7 @@ async function handleChatCompletionsStreamResponse(
 
   let buffer = '';
   let sawDoneMarker = false;
+  let chunkIndex = 0;
 
   const flushDone = () => {
     if (!state.hasMessageStart) return;
@@ -1685,6 +1759,13 @@ async function handleChatCompletionsStreamResponse(
         continue;
       }
 
+      writeOpenAIProxyLog(logContext, 'upstream_stream_chunk', {
+        headers: upstreamResponse.headers,
+        body: packet,
+        meta: { chunkIndex },
+      });
+      chunkIndex += 1;
+
       if (payload === '[DONE]') {
         flushDone();
         sawDoneMarker = true;
@@ -1709,6 +1790,14 @@ async function handleChatCompletionsStreamResponse(
   }
 
   flushDone();
+  writeOpenAIProxyLog(logContext, 'upstream_response', {
+    headers: upstreamResponse.headers,
+    status: upstreamResponse.status,
+    meta: {
+      chunkCount: chunkIndex,
+      done: true,
+    },
+  });
   res.end();
 }
 
@@ -1773,7 +1862,28 @@ export class OpenAIProxyManager {
     });
   }
 
-  acquire(upstream: ResolvedAgentProfile): ProxyRouteHandle {
+  async stop(): Promise<void> {
+    if (!this.server) {
+      return;
+    }
+
+    const server = this.server;
+    this.server = null;
+    this.port = null;
+    this.routes.clear();
+
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  acquire(upstream: ResolvedAgentProfile, groupFolder: string): ProxyRouteHandle {
     if (upstream.apiFormat !== "openai") {
       throw new Error(`Profile "${upstream.profileKey}" does not require the OpenAI proxy.`);
     }
@@ -1783,10 +1893,11 @@ export class OpenAIProxyManager {
 
     const routeId = crypto.randomUUID();
     const apiKey = `octo-openai-proxy-${routeId}`;
-    this.routes.set(routeId, { routeId, apiKey, upstream });
+    this.routes.set(routeId, { routeId, apiKey, upstream, groupFolder });
 
     log.info(TAG, "Proxy route acquired", {
       routeId,
+      groupFolder,
       profileKey: upstream.profileKey,
       upstreamApi: upstream.upstreamApi,
       baseUrl: upstream.baseUrl,
@@ -1799,7 +1910,11 @@ export class OpenAIProxyManager {
       baseUrl: `http://${LOCAL_HOST}:${this.port}/proxy/${routeId}`,
       release: () => {
         if (this.routes.delete(routeId)) {
-          log.info(TAG, "Proxy route released", { routeId, profileKey: upstream.profileKey });
+          log.info(TAG, "Proxy route released", {
+            routeId,
+            groupFolder,
+            profileKey: upstream.profileKey,
+          });
         }
       },
     };
@@ -1861,11 +1976,23 @@ export class OpenAIProxyManager {
       return;
     }
 
+    const requestId = crypto.randomUUID();
     let requestBodyRaw = "";
     try {
       requestBodyRaw = await readRequestBody(req);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid request body";
+      writeOpenAIProxyLog({
+        requestId,
+        groupFolder: route.groupFolder,
+        upstream: route.upstream,
+        url: route.upstream.baseUrl,
+        method,
+        stream: false,
+      }, "error", {
+        headers: req.headers,
+        body: { message },
+      });
       writeJSON(res, 400, createAnthropicErrorBody(message, "invalid_request_error"));
       return;
     }
@@ -1874,6 +2001,17 @@ export class OpenAIProxyManager {
     try {
       parsedRequestBody = JSON.parse(requestBodyRaw);
     } catch {
+      writeOpenAIProxyLog({
+        requestId,
+        groupFolder: route.groupFolder,
+        upstream: route.upstream,
+        url: route.upstream.baseUrl,
+        method,
+        stream: false,
+      }, "error", {
+        headers: req.headers,
+        body: { message: "Request body must be valid JSON", raw: requestBodyRaw },
+      });
       writeJSON(
         res,
         400,
@@ -1924,12 +2062,37 @@ export class OpenAIProxyManager {
 
     const targetURLs = buildUpstreamTargetUrls(upstream.baseUrl, upstreamAPIType);
     let currentTargetURL = targetURLs[0];
+    const buildLogContext = (url: string, status?: number): ModelLogContext => ({
+      requestId,
+      groupFolder: route.groupFolder,
+      upstream,
+      url,
+      method,
+      stream,
+      status,
+    });
+
+    writeOpenAIProxyLog(buildLogContext(targetURLs[0]!), "sdk_request", {
+      headers: req.headers,
+      body: parsedRequestBody,
+      meta: {
+        routePath,
+        upstreamApiType: upstreamAPIType,
+        targetURLs,
+      },
+    });
 
     const sendUpstreamRequest = async (
       payload: Record<string, unknown>,
       targetURL: string,
+      meta?: Record<string, unknown>,
     ): Promise<Response> => {
       currentTargetURL = targetURL;
+      writeOpenAIProxyLog(buildLogContext(targetURL), "upstream_request", {
+        headers,
+        body: payload,
+        meta,
+      });
       return fetch(targetURL, {
         method: "POST",
         headers,
@@ -1937,12 +2100,28 @@ export class OpenAIProxyManager {
       });
     };
 
+    const readErrorResponse = async (response: Response): Promise<string> => {
+      const errorText = await response.text();
+      writeOpenAIProxyLog(buildLogContext(currentTargetURL, response.status), "upstream_response", {
+        headers: response.headers,
+        body: parseJSONOrText(errorText),
+        status: response.status,
+      });
+      return errorText;
+    };
+
     let upstreamResponse: Response;
     try {
-      upstreamResponse = await sendUpstreamRequest(upstreamRequest, targetURLs[0]!);
+      upstreamResponse = await sendUpstreamRequest(upstreamRequest, targetURLs[0]!, {
+        attempt: 0,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Network error";
       this.lastProxyError = message;
+      writeOpenAIProxyLog(buildLogContext(targetURLs[0]!), "error", {
+        headers,
+        body: { message },
+      });
       writeJSON(res, 502, createAnthropicErrorBody(message));
       return;
     }
@@ -1952,10 +2131,17 @@ export class OpenAIProxyManager {
         for (let i = 1; i < targetURLs.length; i += 1) {
           const retryURL = targetURLs[i]!;
           try {
-            upstreamResponse = await sendUpstreamRequest(upstreamRequest, retryURL);
+            upstreamResponse = await sendUpstreamRequest(upstreamRequest, retryURL, {
+              attempt: i,
+              retryReason: "fallback_target_url",
+            });
           } catch (error) {
             const message = error instanceof Error ? error.message : "Network error";
             this.lastProxyError = message;
+            writeOpenAIProxyLog(buildLogContext(retryURL), "error", {
+              headers,
+              body: { message },
+            });
             writeJSON(res, 502, createAnthropicErrorBody(message));
             return;
           }
@@ -1966,7 +2152,7 @@ export class OpenAIProxyManager {
       }
 
       if (!upstreamResponse.ok) {
-        const firstErrorText = await upstreamResponse.text();
+        const firstErrorText = await readErrorResponse(upstreamResponse);
         let firstErrorMessage = extractErrorMessage(firstErrorText);
         if (firstErrorMessage === "Upstream API request failed") {
           firstErrorMessage = `Upstream API request failed (${upstreamResponse.status}) ${currentTargetURL}`;
@@ -1977,14 +2163,20 @@ export class OpenAIProxyManager {
             const stripped = stripToolsFromRequest(upstreamRequest);
             if (stripped) {
               try {
-                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!);
+                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!, {
+                  retryReason: "strip_tools",
+                });
                 if (!upstreamResponse.ok) {
-                  const retryErrorText = await upstreamResponse.text();
+                  const retryErrorText = await readErrorResponse(upstreamResponse);
                   firstErrorMessage = extractErrorMessage(retryErrorText);
                 }
               } catch (error) {
                 const message = error instanceof Error ? error.message : "Network error";
                 this.lastProxyError = message;
+                writeOpenAIProxyLog(buildLogContext(currentTargetURL!), "error", {
+                  headers,
+                  body: { message },
+                });
                 writeJSON(res, 502, createAnthropicErrorBody(message));
                 return;
               }
@@ -1995,14 +2187,21 @@ export class OpenAIProxyManager {
             const convertResult = convertMaxTokensToMaxCompletionTokens(upstreamRequest);
             if (convertResult.changed) {
               try {
-                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!);
+                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!, {
+                  retryReason: "convert_max_completion_tokens",
+                  convertedTo: convertResult.convertedTo,
+                });
                 if (!upstreamResponse.ok) {
-                  const retryErrorText = await upstreamResponse.text();
+                  const retryErrorText = await readErrorResponse(upstreamResponse);
                   firstErrorMessage = extractErrorMessage(retryErrorText);
                 }
               } catch (error) {
                 const message = error instanceof Error ? error.message : "Network error";
                 this.lastProxyError = message;
+                writeOpenAIProxyLog(buildLogContext(currentTargetURL!), "error", {
+                  headers,
+                  body: { message },
+                });
                 writeJSON(res, 502, createAnthropicErrorBody(message));
                 return;
               }
@@ -2013,14 +2212,21 @@ export class OpenAIProxyManager {
             const clampResult = clampMaxTokensFromError(upstreamRequest, firstErrorMessage);
             if (clampResult.changed) {
               try {
-                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!);
+                upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL!, {
+                  retryReason: "clamp_max_tokens",
+                  clampedTo: clampResult.clampedTo,
+                });
                 if (!upstreamResponse.ok) {
-                  const retryErrorText = await upstreamResponse.text();
+                  const retryErrorText = await readErrorResponse(upstreamResponse);
                   firstErrorMessage = extractErrorMessage(retryErrorText);
                 }
               } catch (error) {
                 const message = error instanceof Error ? error.message : "Network error";
                 this.lastProxyError = message;
+                writeOpenAIProxyLog(buildLogContext(currentTargetURL!), "error", {
+                  headers,
+                  body: { message },
+                });
                 writeJSON(res, 502, createAnthropicErrorBody(message));
                 return;
               }
@@ -2030,6 +2236,10 @@ export class OpenAIProxyManager {
 
         if (!upstreamResponse.ok) {
           this.lastProxyError = firstErrorMessage;
+          writeOpenAIProxyLog(buildLogContext(currentTargetURL, upstreamResponse.status), "proxy_response", {
+            body: createAnthropicErrorBody(firstErrorMessage),
+            status: upstreamResponse.status,
+          });
           writeJSON(res, upstreamResponse.status, createAnthropicErrorBody(firstErrorMessage));
           return;
         }
@@ -2040,9 +2250,17 @@ export class OpenAIProxyManager {
 
     if (stream) {
       if (upstreamAPIType === "responses") {
-        await handleResponsesStreamResponse(upstreamResponse, res);
+        await handleResponsesStreamResponse(
+          upstreamResponse,
+          res,
+          buildLogContext(currentTargetURL, upstreamResponse.status),
+        );
       } else {
-        await handleChatCompletionsStreamResponse(upstreamResponse, res);
+        await handleChatCompletionsStreamResponse(
+          upstreamResponse,
+          res,
+          buildLogContext(currentTargetURL, upstreamResponse.status),
+        );
       }
       return;
     }
@@ -2052,21 +2270,40 @@ export class OpenAIProxyManager {
       upstreamJSON = await upstreamResponse.json();
     } catch {
       this.lastProxyError = "Failed to parse upstream JSON response";
+      writeOpenAIProxyLog(buildLogContext(currentTargetURL, upstreamResponse.status), "error", {
+        headers: upstreamResponse.headers,
+        body: { message: "Failed to parse upstream JSON response" },
+        status: upstreamResponse.status,
+      });
       writeJSON(res, 502, createAnthropicErrorBody("Failed to parse upstream JSON response"));
       return;
     }
+
+    writeOpenAIProxyLog(buildLogContext(currentTargetURL, upstreamResponse.status), "upstream_response", {
+      headers: upstreamResponse.headers,
+      body: upstreamJSON,
+      status: upstreamResponse.status,
+    });
 
     if (upstreamAPIType === "responses") {
       const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(upstreamJSON);
       cacheToolCallExtraContentFromOpenAIResponse(syntheticOpenAIResponse);
       cacheToolCallExtraContentFromResponsesResponse(upstreamJSON);
       const anthropicResponse = openAIToAnthropic(syntheticOpenAIResponse);
+      writeOpenAIProxyLog(buildLogContext(currentTargetURL, 200), "proxy_response", {
+        body: anthropicResponse,
+        status: 200,
+      });
       writeJSON(res, 200, anthropicResponse);
       return;
     }
 
     cacheToolCallExtraContentFromOpenAIResponse(upstreamJSON);
     const anthropicResponse = openAIToAnthropic(upstreamJSON);
+    writeOpenAIProxyLog(buildLogContext(currentTargetURL, 200), "proxy_response", {
+      body: anthropicResponse,
+      status: 200,
+    });
     writeJSON(res, 200, anthropicResponse);
   }
 }

@@ -58,6 +58,13 @@ MiniMax 线路说明：
 - 生成后的图片会保存到当前群目录 `.generated/images/`，再由 `send_image` 发送
 - 本地 OpenAI 兼容 proxy 只用于真正的 OpenAI 格式 profile，例如 `codex`
 
+模型交互日志：
+
+- 现有应用日志保持不变，仍写入 `${LOG_DIR}/octo-YYYY-MM-DD.log`
+- 新增完整模型交互日志，写入 `${LOG_DIR}/model/<group-folder>/`
+- 文件名格式为 `octo-model-YYYY-MM-DD(.N).jsonl`
+- 每个 group 独立按天分割；同日单文件超过 `80MB` 时自动切到续号文件
+
 ## 切换线路
 
 在主群里使用：
