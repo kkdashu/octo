@@ -112,3 +112,7 @@ groups/
 - `kimi` / `kimi-cli` 不经过本地 OpenAI proxy
 - `minimax` 不经过本地 OpenAI proxy
 - `generate_image` 使用 MiniMax 独立图片生成接口，不依赖当前群的 `agent_provider`
+- 完整模型交互日志写到 `${LOG_DIR}/model/<group-folder>/`
+- 文件名格式为 `octo-model-YYYY-MM-DD(.N).jsonl`
+- 每个 group 独立按天切分，单文件超过 `80MB` 时继续写入同日续号文件
+- 排查单个群的问题时，直接进入对应 `<group-folder>` 目录查看即可
