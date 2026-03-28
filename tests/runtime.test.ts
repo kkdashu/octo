@@ -54,6 +54,13 @@ function createTempProfilesConfig(): { dir: string; path: string } {
             codingPlanEnabled: true,
             provider: "moonshot",
           },
+          minimax: {
+            apiFormat: "anthropic",
+            baseUrl: "https://api.minimaxi.com/anthropic",
+            apiKeyEnv: "MINIMAX_API_KEY",
+            model: "MiniMax-M2.7",
+            provider: "minimax",
+          },
         },
       },
       null,
@@ -73,6 +80,7 @@ describe("profile-config", () => {
     process.env.ANTHROPIC_API_KEY = "ant-key";
     process.env.OPENAI_API_KEY = "openai-key";
     process.env.MOONSHOT_API_KEY = "moonshot-key";
+    process.env.MINIMAX_API_KEY = "minimax-key";
   });
 
   afterEach(() => {
@@ -111,6 +119,7 @@ describe("profile-config", () => {
       "codex",
       "kimi",
       "kimi-cli",
+      "minimax",
     ]);
 
     const env = buildClaudeSdkEnv(resolveAgentProfile("claude"));
@@ -161,6 +170,21 @@ describe("profile-config", () => {
         }),
       ]),
     );
+  });
+
+  test("resolves minimax profile to anthropic compatibility endpoint", () => {
+    const profile = resolveAgentProfile("minimax");
+    expect(profile.profileKey).toBe("minimax");
+    expect(profile.apiFormat).toBe("anthropic");
+    expect(profile.upstreamApi).toBeUndefined();
+    expect(profile.baseUrl).toBe("https://api.minimaxi.com/anthropic");
+    expect(profile.apiKey).toBe("minimax-key");
+    expect(profile.model).toBe("MiniMax-M2.7");
+
+    const env = buildClaudeSdkEnv(profile);
+    expect(env.ANTHROPIC_API_KEY).toBe("minimax-key");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.minimaxi.com/anthropic");
+    expect(env.ANTHROPIC_MODEL).toBe("MiniMax-M2.7");
   });
 });
 
