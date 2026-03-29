@@ -28,6 +28,10 @@ export function startAdminServer(options: {
         GET: (req) => options.api.getGroup(req),
         PATCH: (req) => options.api.patchGroup(req),
       },
+      "/api/admin/groups/:folder/memory": {
+        PUT: (req) => options.api.putMemory(req),
+        DELETE: (req) => options.api.deleteMemory(req),
+      },
       "/api/admin/groups/:folder/files": {
         GET: (req) => options.api.listFiles(req),
       },
