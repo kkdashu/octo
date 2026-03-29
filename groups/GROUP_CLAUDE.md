@@ -32,10 +32,12 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 ## Memory
 
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+Use group memory tools for durable group preferences, long-term rules, and recurring context.
+
+- When the user says “remember this”, asks for a default behavior, expresses a stable preference, or sets a long-term rule, save it with `remember_group_memory` before replying.
+- Prefer builtin keys first: `topic_context`, `response_language`, `response_style`, `interaction_rule`.
+- Only use a custom key when no builtin key can express the memory.
+- Use `list_group_memory` to inspect memory, `forget_group_memory` to delete one item, and `clear_group_memory` to clear all memory for the current group.
 
 ## Available Tools
 
@@ -51,6 +53,10 @@ When calling tools that require `groupFolder`, use the name of your current work
 | `pause_task` | Pause a task |
 | `resume_task` | Resume a paused task |
 | `cancel_task` | Cancel a task |
+| `remember_group_memory` | Create or update long-term group memory for the current group; prefer builtin keys first |
+| `list_group_memory` | List long-term group memory for the current group |
+| `forget_group_memory` | Delete one long-term group memory item from the current group |
+| `clear_group_memory` | Clear all long-term group memory for the current group |
 | `list_groups` | List all registered groups |
 | `switch_provider` | Switch AI provider for a group |
 

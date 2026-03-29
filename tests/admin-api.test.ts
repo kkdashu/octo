@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAdminApiRouter } from "../src/admin/api";
 import { ADMIN_HOSTNAME, startAdminServer } from "../src/admin/server";
-import { getGroupByFolder, initDatabase, registerGroup } from "../src/db";
+import { getGroupByFolder, initDatabase, registerGroup, upsertGroupMemory } from "../src/db";
 
 function createWorkspace() {
   const dir = join(tmpdir(), `octo-admin-api-${crypto.randomUUID()}`);
@@ -51,6 +51,14 @@ function createWorkspace() {
     requiresTrigger: true,
     isMain: false,
     agentProvider: "claude",
+  });
+
+  upsertGroupMemory(db, {
+    groupFolder: "test-group",
+    key: "topic_context",
+    keyType: "builtin",
+    value: "这个群主要用于英语学习",
+    source: "tool",
   });
 
   writeFileSync(join(dir, "groups", "test-group", "CLAUDE.md"), "hello admin\n", "utf-8");
@@ -146,6 +154,94 @@ describe("admin api router", () => {
     });
   });
 
+  test("returns group memories in group detail and supports memory CRUD", async () => {
+    const { dir, db, configPath } = createWorkspace();
+    cleanupDirs.push(dir);
+    process.env.AGENT_PROFILES_PATH = configPath;
+
+    const router = createAdminApiRouter(db, { rootDir: dir });
+
+    const detailResponse = router.getGroup(withParams(
+      new Request("http://localhost/api/admin/groups/test-group"),
+      { folder: "test-group" },
+    ));
+    expect(detailResponse.status).toBe(200);
+    expect(await detailResponse.json()).toMatchObject({
+      group: { folder: "test-group" },
+      memories: [
+        {
+          key: "topic_context",
+          keyType: "builtin",
+          value: "这个群主要用于英语学习",
+        },
+      ],
+    });
+
+    const createMemoryResponse = await router.putMemory(withParams(
+      new Request("http://localhost/api/admin/groups/test-group/memory", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: "study_goal",
+          keyType: "custom",
+          value: "重点提升英语口语",
+        }),
+      }),
+      { folder: "test-group" },
+    ));
+    expect(createMemoryResponse.status).toBe(200);
+    expect(await createMemoryResponse.json()).toMatchObject({
+      memories: expect.arrayContaining([
+        expect.objectContaining({
+          key: "study_goal",
+          keyType: "custom",
+          value: "重点提升英语口语",
+        }),
+      ]),
+    });
+
+    const invalidBuiltinResponse = await router.putMemory(withParams(
+      new Request("http://localhost/api/admin/groups/test-group/memory", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: "study_goal",
+          keyType: "builtin",
+          value: "不合法",
+        }),
+      }),
+      { folder: "test-group" },
+    ));
+    expect(invalidBuiltinResponse.status).toBe(400);
+    expect(await invalidBuiltinResponse.json()).toMatchObject({
+      error: "invalid_request",
+    });
+
+    const deleteMemoryResponse = router.deleteMemory(withParams(
+      new Request("http://localhost/api/admin/groups/test-group/memory?key=topic_context", {
+        method: "DELETE",
+      }),
+      { folder: "test-group" },
+    ));
+    expect(deleteMemoryResponse.status).toBe(200);
+    expect(await deleteMemoryResponse.json()).toMatchObject({
+      memories: expect.not.arrayContaining([
+        expect.objectContaining({ key: "topic_context" }),
+      ]),
+    });
+
+    const missingMemoryResponse = router.deleteMemory(withParams(
+      new Request("http://localhost/api/admin/groups/test-group/memory?key=missing_key", {
+        method: "DELETE",
+      }),
+      { folder: "test-group" },
+    ));
+    expect(missingMemoryResponse.status).toBe(404);
+    expect(await missingMemoryResponse.json()).toMatchObject({
+      error: "memory_not_found",
+    });
+  });
+
   test("supports file read and write APIs", async () => {
     const { dir, db, configPath } = createWorkspace();
     cleanupDirs.push(dir);
@@ -208,6 +304,8 @@ describe("admin api router", () => {
           listGroups: () => Response.json({ groups: [], availableProfiles: [] }),
           getGroup: () => Response.json({}),
           patchGroup: async () => Response.json({}),
+          putMemory: async () => Response.json({}),
+          deleteMemory: () => Response.json({}),
           listFiles: () => Response.json({ path: ".", entries: [] }),
           getFile: () => Response.json({ path: "x", content: "", size: 0 }),
           putFile: async () => Response.json({}),

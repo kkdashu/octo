@@ -92,3 +92,7 @@ function pollAndExecute(
     }
   }
 }
+
+export const __test__ = {
+  pollAndExecute,
+};

@@ -2,13 +2,23 @@ import type { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import {
+  BUILTIN_GROUP_MEMORY_KEYS,
+  clearGroupMemories,
   getGroupByFolder,
+  isSupportedGroupMemoryKey,
   listGroups,
+  listGroupMemories,
   registerGroup,
   createTask,
+  deleteGroupMemory,
   listTasks,
+  type GroupMemoryRow,
+  type GroupMemoryKeyType,
+  upsertGroupMemory,
   updateTaskStatus,
   updateGroupProvider,
+  validateGroupMemoryKey,
+  type RegisteredGroup,
 } from "./db";
 import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
 import {
@@ -34,6 +44,17 @@ export interface MessageSender {
 type ResolveTargetChatResult =
   | { ok: true; chatJid: string }
   | { ok: false; message: string };
+
+type ResolveTargetGroupResult =
+  | { ok: true; group: RegisteredGroup }
+  | { ok: false; message: string };
+
+const BUILTIN_GROUP_MEMORY_LABELS: Record<string, string> = {
+  topic_context: "Topic context",
+  response_language: "Response language",
+  response_style: "Response style",
+  interaction_rule: "Interaction rule",
+};
 
 function resolveTargetChatJid(
   db: Database,
@@ -61,6 +82,70 @@ function resolveTargetChatJid(
     ok: true,
     chatJid: targetChatJid,
   };
+}
+
+function resolveTargetGroup(
+  db: Database,
+  groupFolder: string,
+  isMain: boolean,
+  requestedTargetGroupFolder: unknown,
+): ResolveTargetGroupResult {
+  const currentGroup = getGroupByFolder(db, groupFolder);
+  if (!currentGroup) {
+    return { ok: false, message: `Group not found: ${groupFolder}` };
+  }
+
+  const normalizedRequestedFolder =
+    typeof requestedTargetGroupFolder === "string" ? requestedTargetGroupFolder.trim() : "";
+  const targetGroupFolder = normalizedRequestedFolder || currentGroup.folder;
+
+  if (!isMain && targetGroupFolder !== currentGroup.folder) {
+    return {
+      ok: false,
+      message: "Permission denied: cannot manage memory for other groups",
+    };
+  }
+
+  const targetGroup = getGroupByFolder(db, targetGroupFolder);
+  if (!targetGroup) {
+    return { ok: false, message: `Group not found: ${targetGroupFolder}` };
+  }
+
+  return { ok: true, group: targetGroup };
+}
+
+function formatGroupLabel(group: RegisteredGroup): string {
+  return `"${group.name}" (${group.folder})`;
+}
+
+function formatGroupMemoryList(
+  group: RegisteredGroup,
+  memories: GroupMemoryRow[],
+): string {
+  if (memories.length === 0) {
+    return `No group memory configured for ${formatGroupLabel(group)}.`;
+  }
+
+  const builtinMemories = memories.filter((memory) => memory.key_type === "builtin");
+  const customMemories = memories.filter((memory) => memory.key_type === "custom");
+  const lines = [`Group memory for ${formatGroupLabel(group)}:`];
+
+  if (builtinMemories.length > 0) {
+    lines.push("Builtin:");
+    for (const memory of builtinMemories) {
+      const label = BUILTIN_GROUP_MEMORY_LABELS[memory.key] ?? memory.key;
+      lines.push(`- ${label} (${memory.key}): ${memory.value}`);
+    }
+  }
+
+  if (customMemories.length > 0) {
+    lines.push("Custom:");
+    for (const memory of customMemories) {
+      lines.push(`- ${memory.key}: ${memory.value}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export function createGroupToolDefs(
@@ -328,6 +413,186 @@ export function createGroupToolDefs(
         log.info(TAG, `[cancel_task] called by group ${groupFolder}`, args);
         updateTaskStatus(db, args.taskId as string, groupFolder, "cancelled");
         return { content: [{ type: "text", text: "Task cancelled" }] };
+      },
+    },
+    {
+      name: "remember_group_memory",
+      description: "Create or update long-term group memory. When the user expresses something the AI should remember, prefer mapping it to a builtin key first, and only create a custom key if no builtin key fits.",
+      schema: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: `Memory key. Prefer builtin keys first: ${BUILTIN_GROUP_MEMORY_KEYS.join(", ")}. Only use a custom key when builtin keys cannot express the memory.` },
+          value: { type: "string", description: "Memory value" },
+          keyType: { type: "string", enum: ["builtin", "custom"], default: "builtin", description: "Choose builtin whenever possible. Use custom only when no builtin key fits." },
+          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+        },
+        required: ["key", "value"],
+      },
+      handler: async (args) => {
+        log.info(TAG, `[remember_group_memory] called by group ${groupFolder}`, args);
+        const resolvedTarget = resolveTargetGroup(
+          db,
+          groupFolder,
+          isMain,
+          args.targetGroupFolder,
+        );
+        if (!resolvedTarget.ok) {
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        }
+
+        const key = typeof args.key === "string" ? args.key.trim() : "";
+        const value = typeof args.value === "string" ? args.value.trim() : "";
+        const keyType: GroupMemoryKeyType =
+          args.keyType === "custom" ? "custom" : "builtin";
+
+        if (!key) {
+          return { content: [{ type: "text", text: "Memory key is required." }] };
+        }
+        if (!value) {
+          return { content: [{ type: "text", text: "Memory value is required." }] };
+        }
+
+        const validationError = validateGroupMemoryKey(key, keyType);
+        if (validationError) {
+          return { content: [{ type: "text", text: validationError }] };
+        }
+
+        upsertGroupMemory(db, {
+          groupFolder: resolvedTarget.group.folder,
+          key,
+          keyType,
+          value,
+          source: "tool",
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Saved group memory for ${formatGroupLabel(resolvedTarget.group)}: ${key} = ${value}`,
+            },
+          ],
+        };
+      },
+    },
+    {
+      name: "list_group_memory",
+      description: "List long-term group memory for the current group or, from the main group, another group",
+      schema: {
+        type: "object",
+        properties: {
+          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+        },
+        required: [],
+      },
+      handler: async (args) => {
+        log.info(TAG, `[list_group_memory] called by group ${groupFolder}`, args);
+        const resolvedTarget = resolveTargetGroup(
+          db,
+          groupFolder,
+          isMain,
+          args.targetGroupFolder,
+        );
+        if (!resolvedTarget.ok) {
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        }
+
+        const memories = listGroupMemories(db, resolvedTarget.group.folder);
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatGroupMemoryList(resolvedTarget.group, memories),
+            },
+          ],
+        };
+      },
+    },
+    {
+      name: "forget_group_memory",
+      description: "Delete one long-term memory item from the current group or, from the main group, another group",
+      schema: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Memory key to delete" },
+          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+        },
+        required: ["key"],
+      },
+      handler: async (args) => {
+        log.info(TAG, `[forget_group_memory] called by group ${groupFolder}`, args);
+        const resolvedTarget = resolveTargetGroup(
+          db,
+          groupFolder,
+          isMain,
+          args.targetGroupFolder,
+        );
+        if (!resolvedTarget.ok) {
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        }
+
+        const key = typeof args.key === "string" ? args.key.trim() : "";
+        if (!key) {
+          return { content: [{ type: "text", text: "Memory key is required." }] };
+        }
+        if (!isSupportedGroupMemoryKey(key)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Invalid memory key: ${key}. Use a builtin key or lowercase letters and underscores for custom keys.`,
+              },
+            ],
+          };
+        }
+
+        const deleted = deleteGroupMemory(db, resolvedTarget.group.folder, key);
+        return {
+          content: [
+            {
+              type: "text",
+              text: deleted
+                ? `Deleted group memory "${key}" from ${formatGroupLabel(resolvedTarget.group)}.`
+                : `Memory key not found for ${formatGroupLabel(resolvedTarget.group)}: ${key}`,
+            },
+          ],
+        };
+      },
+    },
+    {
+      name: "clear_group_memory",
+      description: "Clear all long-term memory for the current group or, from the main group, another group",
+      schema: {
+        type: "object",
+        properties: {
+          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+        },
+        required: [],
+      },
+      handler: async (args) => {
+        log.info(TAG, `[clear_group_memory] called by group ${groupFolder}`, args);
+        const resolvedTarget = resolveTargetGroup(
+          db,
+          groupFolder,
+          isMain,
+          args.targetGroupFolder,
+        );
+        if (!resolvedTarget.ok) {
+          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        }
+
+        const clearedCount = clearGroupMemories(db, resolvedTarget.group.folder);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                clearedCount > 0
+                  ? `Cleared ${clearedCount} group memory item(s) for ${formatGroupLabel(resolvedTarget.group)}.`
+                  : `No group memory to clear for ${formatGroupLabel(resolvedTarget.group)}.`,
+            },
+          ],
+        };
       },
     },
     {

@@ -10,6 +10,7 @@
 - 统一工具：全部通过 Claude SDK 进程内 MCP 接入
 - MiniMax 文生图：通过 `generate_image` 生成本地图片，再复用 `send_image` 发送
 - 会话恢复：群组切换 profile 不再清 session
+- 群级长期记忆：数据库持久化的 group memory 会在新 session 和定时任务启动时自动注入
 - 定时任务与技能安装：沿用现有工具体系
 
 ## 架构
@@ -79,6 +80,26 @@ sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-c
 ```
 
 这里的 `agent_provider` 现在表示 profile key，不再表示底层 SDK 类型，例如可以切到 `minimax`。
+
+## 群记忆
+
+可在群内通过以下工具维护长期记忆：
+
+- `remember_group_memory`
+- `list_group_memory`
+- `forget_group_memory`
+- `clear_group_memory`
+
+内置 key 包括：
+
+- `topic_context`
+- `response_language`
+- `response_style`
+- `interaction_rule`
+
+当内置 key 不够用时，也支持使用仅包含小写字母和下划线的 custom key，例如 `study_goal`、`difficulty_level`。
+
+群记忆存储在 SQLite `group_memories` 表中，只在新 session 启动时注入；active session 不做热更新。定时任务走统一的 `GroupQueue.enqueue()` 链路，因此也会复用同一份群记忆。
 
 ## 配置文件
 

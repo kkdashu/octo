@@ -19,6 +19,15 @@ export interface AdminGroupDto {
   addedAt: string;
 }
 
+export interface AdminGroupMemoryDto {
+  key: string;
+  keyType: "builtin" | "custom";
+  value: string;
+  source: "user" | "tool";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AdminGroupListResponse {
   groups: AdminGroupDto[];
   availableProfiles: AdminProfileOption[];
@@ -27,6 +36,7 @@ export interface AdminGroupListResponse {
 export interface AdminGroupDetailResponse {
   group: AdminGroupDto;
   availableProfiles: AdminProfileOption[];
+  memories: AdminGroupMemoryDto[];
 }
 
 export type AdminDirectoryEntryKind = "file" | "directory";

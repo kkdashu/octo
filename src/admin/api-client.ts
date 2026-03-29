@@ -55,6 +55,33 @@ export const adminApiClient = {
     );
   },
 
+  upsertMemory(
+    folder: string,
+    payload: {
+      key: string;
+      keyType: "builtin" | "custom";
+      value: string;
+    },
+  ) {
+    return request<AdminGroupDetailResponse>(
+      `/api/admin/groups/${encodeURIComponent(folder)}/memory`,
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+
+  deleteMemory(folder: string, key: string) {
+    const query = new URLSearchParams({ key });
+    return request<AdminGroupDetailResponse>(
+      `/api/admin/groups/${encodeURIComponent(folder)}/memory?${query.toString()}`,
+      {
+        method: "DELETE",
+      },
+    );
+  },
+
   listFiles(folder: string, path = ".") {
     const query = new URLSearchParams({ path });
     return request<AdminDirectoryListingDto>(
