@@ -534,6 +534,16 @@ export function deleteSessionId(
   ).run({ groupFolder: folder });
 }
 
+export function clearAllSessionIds(
+  db: Database,
+): number {
+  const row = db
+    .query("SELECT COUNT(*) AS count FROM sessions")
+    .get() as { count: number };
+  db.run("DELETE FROM sessions");
+  return row.count;
+}
+
 // ---------------------------------------------------------------------------
 // Image understanding cache
 // ---------------------------------------------------------------------------

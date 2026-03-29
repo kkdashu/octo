@@ -6,15 +6,18 @@ import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
 import {
   BUILTIN_GROUP_MEMORY_KEYS,
+  clearAllSessionIds,
   clearGroupMemories,
   createTask,
   deleteGroupMemory,
+  getSessionId,
   initDatabase,
   isBuiltinGroupMemoryKey,
   isSupportedGroupMemoryKey,
   isValidCustomGroupMemoryKey,
   listGroupMemories,
   registerGroup,
+  saveSessionId,
   upsertGroupMemory,
   validateGroupMemoryKey,
 } from "../src/db";
@@ -177,6 +180,18 @@ describe("group memory data layer", () => {
     expect(clearGroupMemories(db, "english-group")).toBe(0);
     expect(listGroupMemories(db, "english-group")).toEqual([]);
   });
+
+  test("clears persisted session ids when forcing fresh startup sessions", () => {
+    const { dir, db } = createWorkspace();
+    cleanupDirs.push(dir);
+
+    saveSessionId(db, "main", "session-main");
+    saveSessionId(db, "english-group", "session-english");
+
+    expect(clearAllSessionIds(db)).toBe(2);
+    expect(getSessionId(db, "main")).toBeNull();
+    expect(getSessionId(db, "english-group")).toBeNull();
+  });
 });
 
 describe("group memory tools", () => {
@@ -277,6 +292,32 @@ describe("group memory tools", () => {
 });
 
 describe("group memory prompt injection", () => {
+  test("injects memory policy even when the group has no stored memory yet", async () => {
+    const { dir, db } = createWorkspace();
+    cleanupDirs.push(dir);
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+
+    const { provider, started } = createCapturingProvider();
+    const groupQueue = new GroupQueue(
+      db,
+      createFakeChannelManager(),
+      provider,
+      1,
+    );
+
+    await groupQueue.enqueue(
+      "main",
+      "[2026-03-29T07:16:02.252Z] Alice: 记住：你要输出英文",
+    );
+
+    const sessionConfig = await started;
+    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
+    expect(sessionConfig.initialPrompt).toContain("remember_group_memory before replying");
+    expect(sessionConfig.initialPrompt).toContain("response_language = English");
+    expect(sessionConfig.initialPrompt).toContain("Current input:");
+    expect(sessionConfig.initialPrompt).toContain("记住：你要输出英文");
+  });
+
   test("injects group memory into a fresh group session prompt", async () => {
     const { dir, db } = createWorkspace();
     cleanupDirs.push(dir);
@@ -311,6 +352,7 @@ describe("group memory prompt injection", () => {
     );
 
     const sessionConfig = await started;
+    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
     expect(sessionConfig.initialPrompt).toContain("Group memory:");
     expect(sessionConfig.initialPrompt).toContain("Topic context: 这个群主要用于英语学习");
     expect(sessionConfig.initialPrompt).toContain(
@@ -357,6 +399,7 @@ describe("group memory prompt injection", () => {
     );
 
     const sessionConfig = await started;
+    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
     expect(sessionConfig.initialPrompt).toContain("Group memory:");
     expect(sessionConfig.initialPrompt).toContain("Custom study_goal: 重点提升英语口语");
     expect(sessionConfig.initialPrompt).toContain("[Scheduled Task");

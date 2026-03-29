@@ -1,6 +1,13 @@
 import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { initDatabase, insertMessage, registerGroup, getGroupByJid, listGroups } from "./db";
+import {
+  clearAllSessionIds,
+  getGroupByJid,
+  initDatabase,
+  insertMessage,
+  listGroups,
+  registerGroup,
+} from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
@@ -27,6 +34,10 @@ const TAG = "main";
 log.info(TAG, "Initializing database at store/messages.db");
 const db = initDatabase("store/messages.db");
 log.info(TAG, "Database initialized successfully");
+const clearedSessionCount = clearAllSessionIds(db);
+log.info(TAG, "Cleared persisted Claude session ids on startup", {
+  clearedSessionCount,
+});
 
 // ---------------------------------------------------------------------------
 // 2. Create channel manager

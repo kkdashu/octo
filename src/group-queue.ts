@@ -27,6 +27,14 @@ const BUILTIN_GROUP_MEMORY_PROMPT_LABELS: Record<string, string> = {
 
 const GROUP_MEMORY_VALUE_LIMIT = 240;
 const GROUP_MEMORY_BLOCK_LIMIT = 1200;
+const GROUP_MEMORY_POLICY_LINES = [
+  "Group memory policy:",
+  "- When the user asks you to remember a stable preference, long-term rule, recurring context, or default behavior for this group, save it with remember_group_memory before replying.",
+  "- Prefer builtin keys first: topic_context, response_language, response_style, interaction_rule.",
+  "- Only use a custom key when no builtin key fits the memory.",
+  "- Example: if the user says future replies should be in English, save response_language = English.",
+  "- When the user wants to inspect, update, delete, or clear group memory, use list_group_memory, remember_group_memory, forget_group_memory, or clear_group_memory.",
+];
 
 function normalizeGroupMemoryValue(value: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -65,21 +73,27 @@ export function buildGroupMemoryPromptBlock(
   return lines.join("\n");
 }
 
+function buildGroupMemoryPolicyBlock(): string {
+  return GROUP_MEMORY_POLICY_LINES.join("\n");
+}
+
 export function buildSessionInitialPrompt(
   initialPrompt: string,
   memories: GroupMemoryRow[],
-  shouldInjectMemory: boolean,
+  shouldInjectMemoryContext: boolean,
 ): string {
-  if (!shouldInjectMemory) {
+  if (!shouldInjectMemoryContext) {
     return initialPrompt;
   }
 
+  const sections = [buildGroupMemoryPolicyBlock()];
   const memoryBlock = buildGroupMemoryPromptBlock(memories);
-  if (!memoryBlock) {
-    return initialPrompt;
+  if (memoryBlock) {
+    sections.push(memoryBlock);
   }
+  sections.push(`Current input:\n${initialPrompt}`);
 
-  return `${memoryBlock}\n\nCurrent input:\n${initialPrompt}`;
+  return sections.join("\n\n");
 }
 
 export async function resolveClaudeResumeSessionId(
@@ -225,6 +239,7 @@ export class GroupQueue {
       }
 
       const memories = listGroupMemories(this.db, groupFolder);
+      const memoryBlock = buildGroupMemoryPromptBlock(memories);
       const initialPromptWithMemory = buildSessionInitialPrompt(
         initialPrompt,
         memories,
@@ -234,7 +249,8 @@ export class GroupQueue {
       log.info(TAG, `Prepared session prompt for ${groupFolder}`, {
         resumedSession: !!resumeSessionId,
         memoryCount: memories.length,
-        memoryInjected: !!buildGroupMemoryPromptBlock(memories) && !resumeSessionId,
+        memoryPolicyInjected: !resumeSessionId,
+        memoryInjected: !!memoryBlock && !resumeSessionId,
       });
 
       const { session, events } = await this.provider.startSession({
