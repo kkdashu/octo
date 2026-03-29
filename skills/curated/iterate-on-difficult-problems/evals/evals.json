@@ -1,0 +1,20 @@
+{
+  "skill_name": "iterate-on-difficult-problems",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write a Python function that finds the longest palindromic substring. Then run it through an eval-driven improvement loop — write a test script that scores correctness and performance, iterate until all tests pass and the solution is efficient.",
+      "expected_output": "A well-optimized longest palindromic substring implementation with passing tests and a clear iteration log showing score improvements."
+    },
+    {
+      "id": 2,
+      "prompt": "Generate a simple infographic poster about climate change using HTML/CSS. Run an eval-driven loop — create a rubric that scores clarity, visual appeal, and data accuracy, iterate until the score is above 85%.",
+      "expected_output": "A polished HTML infographic with iteration log showing score progression toward 85%."
+    },
+    {
+      "id": 3,
+      "prompt": "Write a product description for a new coffee subscription service. Use an eval-driven improvement loop — create an LLM-as-a-judge rubric for engagement and accuracy, iterate until both scores are above 90%.",
+      "expected_output": "A compelling product description with an iteration log showing improvements toward 90% on both dimensions."
+    }
+  ]
+}
