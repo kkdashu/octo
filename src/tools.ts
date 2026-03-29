@@ -51,11 +51,9 @@ type ResolveTargetGroupResult =
 
 const BUILTIN_GROUP_MEMORY_LABELS: Record<string, string> = {
   topic_context: "Topic context",
-  study_goal: "Study goal",
   response_language: "Response language",
   response_style: "Response style",
   interaction_rule: "Interaction rule",
-  difficulty_level: "Difficulty level",
 };
 
 function resolveTargetChatJid(
@@ -419,13 +417,13 @@ export function createGroupToolDefs(
     },
     {
       name: "remember_group_memory",
-      description: "Create or update a long-term memory item for the current group or, from the main group, another group",
+      description: "Create or update long-term group memory. When the user expresses something the AI should remember, prefer mapping it to a builtin key first, and only create a custom key if no builtin key fits.",
       schema: {
         type: "object",
         properties: {
-          key: { type: "string", description: `Memory key. Builtin keys: ${BUILTIN_GROUP_MEMORY_KEYS.join(", ")}` },
+          key: { type: "string", description: `Memory key. Prefer builtin keys first: ${BUILTIN_GROUP_MEMORY_KEYS.join(", ")}. Only use a custom key when builtin keys cannot express the memory.` },
           value: { type: "string", description: "Memory value" },
-          keyType: { type: "string", enum: ["builtin", "custom"], default: "builtin" },
+          keyType: { type: "string", enum: ["builtin", "custom"], default: "builtin", description: "Choose builtin whenever possible. Use custom only when no builtin key fits." },
           targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
         },
         required: ["key", "value"],

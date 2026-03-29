@@ -121,13 +121,22 @@ describe("group memory data layer", () => {
     cleanupDirs.push(dir);
 
     expect(BUILTIN_GROUP_MEMORY_KEYS).toContain("topic_context");
+    expect(BUILTIN_GROUP_MEMORY_KEYS).not.toContain("study_goal");
+    expect(BUILTIN_GROUP_MEMORY_KEYS).not.toContain("difficulty_level");
     expect(isBuiltinGroupMemoryKey("topic_context")).toBe(true);
+    expect(isBuiltinGroupMemoryKey("study_goal")).toBe(false);
     expect(isBuiltinGroupMemoryKey("teacher_persona")).toBe(false);
+    expect(isValidCustomGroupMemoryKey("study_goal")).toBe(true);
     expect(isValidCustomGroupMemoryKey("teacher_persona")).toBe(true);
     expect(isValidCustomGroupMemoryKey("teacher-persona")).toBe(false);
+    expect(isSupportedGroupMemoryKey("study_goal")).toBe(true);
     expect(isSupportedGroupMemoryKey("teacher_persona")).toBe(true);
     expect(isSupportedGroupMemoryKey("teacher-persona")).toBe(false);
     expect(validateGroupMemoryKey("topic_context", "builtin")).toBeNull();
+    expect(validateGroupMemoryKey("study_goal", "builtin")).toContain(
+      "Invalid builtin key",
+    );
+    expect(validateGroupMemoryKey("study_goal", "custom")).toBeNull();
     expect(validateGroupMemoryKey("teacher-persona", "custom")).toContain(
       "lowercase letters and underscores",
     );
@@ -184,6 +193,15 @@ describe("group memory tools", () => {
     const regularTools = createGroupToolDefs("english-group", false, db, sender, dir);
     const regularRemember = regularTools.find((tool) => tool.name === "remember_group_memory");
     const regularList = regularTools.find((tool) => tool.name === "list_group_memory");
+
+    expect(regularRemember?.description).toContain("prefer mapping it to a builtin key first");
+    expect(regularRemember?.schema).toMatchObject({
+      properties: {
+        keyType: {
+          description: "Choose builtin whenever possible. Use custom only when no builtin key fits.",
+        },
+      },
+    });
 
     await expect(
       regularRemember!.handler({
@@ -310,7 +328,7 @@ describe("group memory prompt injection", () => {
     upsertGroupMemory(db, {
       groupFolder: "english-group",
       key: "study_goal",
-      keyType: "builtin",
+      keyType: "custom",
       value: "重点提升英语口语",
       source: "tool",
     });
@@ -340,7 +358,7 @@ describe("group memory prompt injection", () => {
 
     const sessionConfig = await started;
     expect(sessionConfig.initialPrompt).toContain("Group memory:");
-    expect(sessionConfig.initialPrompt).toContain("Study goal: 重点提升英语口语");
+    expect(sessionConfig.initialPrompt).toContain("Custom study_goal: 重点提升英语口语");
     expect(sessionConfig.initialPrompt).toContain("[Scheduled Task");
     expect(sessionConfig.initialPrompt).toContain("请发送今日英语练习");
   });

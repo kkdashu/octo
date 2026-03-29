@@ -189,9 +189,6 @@ MVP 只支持一种 scope：
 - `topic_context`
   - 这个群长期是做什么的
   - 例：`这个群主要用于英语学习`
-- `study_goal`
-  - 该群的学习/使用目标
-  - 例：`重点提升英语口语`
 - `response_language`
   - 输出语言偏好
   - 例：`中文讲解，英文举例`
@@ -201,9 +198,6 @@ MVP 只支持一种 scope：
 - `interaction_rule`
   - 长期交互规则
   - 例：`每次练习尽量控制在5分钟以内，并给出例句`
-- `difficulty_level`
-  - 难度偏好
-  - 例：`初级` / `中级` / `偏口语交流`
 
 #### 2. custom key（扩展 key）
 
@@ -211,6 +205,10 @@ MVP 只支持一种 scope：
 
 例如英语学习群可能扩展：
 
+- `study_goal`
+  - 例：`重点提升英语口语`
+- `difficulty_level`
+  - 例：`初级` / `中级` / `偏口语交流`
 - `teacher_persona`
   - 例：`像耐心的一对一家教`
 - `correction_policy`
@@ -328,8 +326,18 @@ MVP 建议增加 4 个工具：
 
 - 普通群不能指定其他群
 - 主群可以指定目标群
+- 当用户表达长期意愿、偏好、固定规则、或明确要求“记住”某件事时，工具应优先判断是否可以归纳到 builtin key
+- 只有在 builtin key 无法准确承载该信息时，才新增 custom key
 - 若 `keyType = builtin`，则 `key` 必须属于内置集合
 - 若 `keyType = custom`，则 `key` 必须满足命名规范
+
+工具说明建议额外强调：
+
+- 该工具不是机械写库，而是“先归纳、后落库”的长期记忆工具
+- 例如“这个群主要用于英语学习”应优先归纳为 `topic_context`
+- “默认中文讲解、英文举例”应优先归纳为 `response_language`
+- “回答像老师一样循序渐进”应优先归纳为 `response_style`
+- 只有 builtin key 不足时，才自行决定增加 custom key
 
 ### list_group_memory
 
@@ -406,10 +414,10 @@ Group memory:
 管理员先写入 memory：
 
 - `topic_context = 这个群主要用于英语学习`
-- `study_goal = 重点提升口语`
 - `response_language = 中文讲解，英文举例`
 - `response_style = 像英语老师一样循序渐进`
 - `interaction_rule = 每次练习控制在5分钟以内`
+- `study_goal = 重点提升口语`（custom key）
 
 再创建定时任务：
 

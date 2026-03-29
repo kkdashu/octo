@@ -100,8 +100,8 @@ groups/
 ## 群级记忆
 
 - 长期记忆存储在 SQLite `group_memories` 表，而不是聊天记录归档
-- 支持 builtin key：`topic_context`、`study_goal`、`response_language`、`response_style`、`interaction_rule`、`difficulty_level`
-- 也支持 custom key，但 key 只能使用小写字母和下划线
+- 支持 builtin key：`topic_context`、`response_language`、`response_style`、`interaction_rule`
+- 也支持 custom key，但 key 只能使用小写字母和下划线，例如 `study_goal`、`difficulty_level`
 - 普通群只能管理自己的 memory；主群可以跨群管理
 - 记忆只在新 session 启动时注入，避免对 active session 做热更新
 - 定时任务通过 `GroupQueue.enqueue()` 启动时，同样会复用该群的 memory

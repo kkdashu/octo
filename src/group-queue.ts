@@ -20,11 +20,9 @@ const TAG = "group-queue";
 
 const BUILTIN_GROUP_MEMORY_PROMPT_LABELS: Record<string, string> = {
   topic_context: "Topic context",
-  study_goal: "Study goal",
   response_language: "Preferred explanation language",
   response_style: "Preferred response style",
   interaction_rule: "Interaction rule",
-  difficulty_level: "Difficulty level",
 };
 
 const GROUP_MEMORY_VALUE_LIMIT = 240;

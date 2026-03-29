@@ -166,11 +166,9 @@ export interface ImageUnderstandingCacheRow {
 
 export const BUILTIN_GROUP_MEMORY_KEYS = [
   "topic_context",
-  "study_goal",
   "response_language",
   "response_style",
   "interaction_rule",
-  "difficulty_level",
 ] as const;
 
 export type BuiltinGroupMemoryKey = (typeof BUILTIN_GROUP_MEMORY_KEYS)[number];

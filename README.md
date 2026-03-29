@@ -93,13 +93,11 @@ sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-c
 内置 key 包括：
 
 - `topic_context`
-- `study_goal`
 - `response_language`
 - `response_style`
 - `interaction_rule`
-- `difficulty_level`
 
-当内置 key 不够用时，也支持使用仅包含小写字母和下划线的 custom key。
+当内置 key 不够用时，也支持使用仅包含小写字母和下划线的 custom key，例如 `study_goal`、`difficulty_level`。
 
 群记忆存储在 SQLite `group_memories` 表中，只在新 session 启动时注入；active session 不做热更新。定时任务走统一的 `GroupQueue.enqueue()` 链路，因此也会复用同一份群记忆。
 
