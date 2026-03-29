@@ -31,10 +31,12 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 ## Memory
 
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
-- Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+Use group memory tools for durable group preferences, long-term rules, and recurring context.
+
+- When the user says “remember this”, asks for a default behavior, expresses a stable preference, or sets a long-term rule, save it with `mcp__octo-tools__remember_group_memory` before replying.
+- Prefer builtin keys first: `topic_context`, `response_language`, `response_style`, `interaction_rule`.
+- Only use a custom key when no builtin key can express the memory.
+- Use `mcp__octo-tools__list_group_memory` to inspect memory, `mcp__octo-tools__forget_group_memory` to delete one item, and `mcp__octo-tools__clear_group_memory` to clear all memory.
 
 ## Formatting
 
@@ -65,6 +67,10 @@ Main group has access to these MCP tools:
 | `mcp__octo-tools__pause_task` | Pause a task |
 | `mcp__octo-tools__resume_task` | Resume a paused task |
 | `mcp__octo-tools__cancel_task` | Cancel a task |
+| `mcp__octo-tools__remember_group_memory` | Create or update long-term group memory; prefer builtin keys first |
+| `mcp__octo-tools__list_group_memory` | List long-term group memory for the current group, or another group when needed |
+| `mcp__octo-tools__forget_group_memory` | Delete one long-term group memory item from the current group, or another group when needed |
+| `mcp__octo-tools__clear_group_memory` | Clear all long-term group memory for the current group, or another group when needed |
 | `mcp__octo-tools__list_groups` | List all registered groups |
 | `mcp__octo-tools__register_group` | Register a new group |
 | `mcp__octo-tools__refresh_groups` | Refresh group metadata from Feishu |
