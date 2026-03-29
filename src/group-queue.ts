@@ -3,14 +3,86 @@ import { resolve } from "node:path";
 import { listSessions } from "@anthropic-ai/claude-agent-sdk";
 import type { ChannelManager } from "./channels/manager";
 import { resolveAgentProfile } from "./runtime/profile-config";
-import { ClaudeProvider } from "./providers/claude";
-import type { AgentSession } from "./providers/types";
-import { deleteSessionId, getGroupByFolder, getSessionId, saveSessionId } from "./db";
+import type { AgentProvider, AgentSession } from "./providers/types";
+import {
+  deleteSessionId,
+  getGroupByFolder,
+  getSessionId,
+  listGroupMemories,
+  saveSessionId,
+  type GroupMemoryRow,
+} from "./db";
 import { createGroupToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "group-queue";
+
+const BUILTIN_GROUP_MEMORY_PROMPT_LABELS: Record<string, string> = {
+  topic_context: "Topic context",
+  study_goal: "Study goal",
+  response_language: "Preferred explanation language",
+  response_style: "Preferred response style",
+  interaction_rule: "Interaction rule",
+  difficulty_level: "Difficulty level",
+};
+
+const GROUP_MEMORY_VALUE_LIMIT = 240;
+const GROUP_MEMORY_BLOCK_LIMIT = 1200;
+
+function normalizeGroupMemoryValue(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= GROUP_MEMORY_VALUE_LIMIT) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, GROUP_MEMORY_VALUE_LIMIT - 3).trimEnd()}...`;
+}
+
+export function buildGroupMemoryPromptBlock(
+  memories: GroupMemoryRow[],
+): string | null {
+  if (memories.length === 0) {
+    return null;
+  }
+
+  const lines = ["Group memory:"];
+
+  for (const memory of memories) {
+    const label =
+      memory.key_type === "builtin"
+        ? (BUILTIN_GROUP_MEMORY_PROMPT_LABELS[memory.key] ?? memory.key)
+        : `Custom ${memory.key}`;
+    const line = `- ${label}: ${normalizeGroupMemoryValue(memory.value)}`;
+    const nextBlock = [...lines, line].join("\n");
+
+    if (nextBlock.length > GROUP_MEMORY_BLOCK_LIMIT) {
+      lines.push("- Additional memory omitted to keep context concise.");
+      break;
+    }
+
+    lines.push(line);
+  }
+
+  return lines.join("\n");
+}
+
+export function buildSessionInitialPrompt(
+  initialPrompt: string,
+  memories: GroupMemoryRow[],
+  shouldInjectMemory: boolean,
+): string {
+  if (!shouldInjectMemory) {
+    return initialPrompt;
+  }
+
+  const memoryBlock = buildGroupMemoryPromptBlock(memories);
+  if (!memoryBlock) {
+    return initialPrompt;
+  }
+
+  return `${memoryBlock}\n\nCurrent input:\n${initialPrompt}`;
+}
 
 export async function resolveClaudeResumeSessionId(
   workingDirectory: string,
@@ -38,12 +110,12 @@ export class GroupQueue {
   private concurrencyLimit: number;
   private db: Database;
   private channelManager: ChannelManager;
-  private provider: ClaudeProvider;
+  private provider: AgentProvider;
 
   constructor(
     db: Database,
     channelManager: ChannelManager,
-    provider: ClaudeProvider,
+    provider: AgentProvider,
     concurrencyLimit = 3,
   ) {
     this.db = db;
@@ -154,10 +226,23 @@ export class GroupQueue {
         });
       }
 
+      const memories = listGroupMemories(this.db, groupFolder);
+      const initialPromptWithMemory = buildSessionInitialPrompt(
+        initialPrompt,
+        memories,
+        !resumeSessionId,
+      );
+
+      log.info(TAG, `Prepared session prompt for ${groupFolder}`, {
+        resumedSession: !!resumeSessionId,
+        memoryCount: memories.length,
+        memoryInjected: !!buildGroupMemoryPromptBlock(memories) && !resumeSessionId,
+      });
+
       const { session, events } = await this.provider.startSession({
         groupFolder,
         workingDirectory,
-        initialPrompt,
+        initialPrompt: initialPromptWithMemory,
         isMain,
         resumeSessionId,
         tools,
@@ -267,3 +352,8 @@ export class GroupQueue {
     return { closedActiveSession, sessionId };
   }
 }
+
+export const __test__ = {
+  buildGroupMemoryPromptBlock,
+  buildSessionInitialPrompt,
+};

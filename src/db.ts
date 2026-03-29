@@ -83,6 +83,19 @@ export function initDatabase(dbPath: string): Database {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS group_memories (
+      group_folder TEXT NOT NULL,
+      key TEXT NOT NULL,
+      key_type TEXT NOT NULL DEFAULT 'builtin',
+      value TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'user',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (group_folder, key)
+    )
+  `);
+
   // Migrations: add columns that may not exist in older databases
   try {
     db.run("ALTER TABLE messages ADD COLUMN mentions_me INTEGER DEFAULT 0");
@@ -149,6 +162,64 @@ export interface ImageUnderstandingCacheRow {
   analysis_text: string;
   created_at: string;
   updated_at: string;
+}
+
+export const BUILTIN_GROUP_MEMORY_KEYS = [
+  "topic_context",
+  "study_goal",
+  "response_language",
+  "response_style",
+  "interaction_rule",
+  "difficulty_level",
+] as const;
+
+export type BuiltinGroupMemoryKey = (typeof BUILTIN_GROUP_MEMORY_KEYS)[number];
+export type GroupMemoryKeyType = "builtin" | "custom";
+export type GroupMemorySource = "user" | "tool";
+
+export interface GroupMemoryRow {
+  group_folder: string;
+  key: string;
+  key_type: GroupMemoryKeyType;
+  value: string;
+  source: GroupMemorySource;
+  created_at: string;
+  updated_at: string;
+}
+
+const GROUP_MEMORY_CUSTOM_KEY_PATTERN = /^[a-z]+(?:_[a-z]+)*$/;
+
+export function isBuiltinGroupMemoryKey(
+  key: string,
+): key is BuiltinGroupMemoryKey {
+  return BUILTIN_GROUP_MEMORY_KEYS.includes(key as BuiltinGroupMemoryKey);
+}
+
+export function isValidCustomGroupMemoryKey(key: string): boolean {
+  return GROUP_MEMORY_CUSTOM_KEY_PATTERN.test(key);
+}
+
+export function isSupportedGroupMemoryKey(key: string): boolean {
+  return isBuiltinGroupMemoryKey(key) || isValidCustomGroupMemoryKey(key);
+}
+
+export function validateGroupMemoryKey(
+  key: string,
+  keyType: GroupMemoryKeyType,
+): string | null {
+  if (keyType === "builtin") {
+    if (isBuiltinGroupMemoryKey(key)) {
+      return null;
+    }
+
+    return `Invalid builtin key: ${key}. Allowed keys: ${BUILTIN_GROUP_MEMORY_KEYS.join(", ")}`;
+  }
+
+  if (isValidCustomGroupMemoryKey(key)) {
+    return null;
+  }
+
+  return `Invalid custom key: ${key}. Use lowercase letters and underscores only.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +392,114 @@ export function updateGroupMetadata(
     requiresTrigger: patch.requiresTrigger ? 1 : 0,
     agentProvider: patch.agentProvider,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Group memories
+// ---------------------------------------------------------------------------
+
+export function listGroupMemories(
+  db: Database,
+  groupFolder: string,
+): GroupMemoryRow[] {
+  return db
+    .query(
+      `SELECT * FROM group_memories
+       WHERE group_folder = $groupFolder
+       ORDER BY CASE key_type WHEN 'builtin' THEN 0 ELSE 1 END ASC, key ASC`,
+    )
+    .all({ groupFolder }) as GroupMemoryRow[];
+}
+
+export function upsertGroupMemory(
+  db: Database,
+  memory: {
+    groupFolder: string;
+    key: string;
+    keyType: GroupMemoryKeyType;
+    value: string;
+    source?: GroupMemorySource;
+  },
+) {
+  const now = new Date().toISOString();
+  db.query(
+    `INSERT INTO group_memories (
+       group_folder,
+       key,
+       key_type,
+       value,
+       source,
+       created_at,
+       updated_at
+     ) VALUES (
+       $groupFolder,
+       $key,
+       $keyType,
+       $value,
+       $source,
+       $createdAt,
+       $updatedAt
+     )
+     ON CONFLICT(group_folder, key) DO UPDATE SET
+       key_type = $keyType,
+       value = $value,
+       source = $source,
+       updated_at = $updatedAt`,
+  ).run({
+    groupFolder: memory.groupFolder,
+    key: memory.key,
+    keyType: memory.keyType,
+    value: memory.value,
+    source: memory.source ?? "user",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+export function deleteGroupMemory(
+  db: Database,
+  groupFolder: string,
+  key: string,
+): boolean {
+  const existing = db
+    .query(
+      `SELECT key FROM group_memories
+       WHERE group_folder = $groupFolder AND key = $key`,
+    )
+    .get({ groupFolder, key }) as { key: string } | null;
+
+  if (!existing) {
+    return false;
+  }
+
+  db.query(
+    `DELETE FROM group_memories
+     WHERE group_folder = $groupFolder AND key = $key`,
+  ).run({ groupFolder, key });
+
+  return true;
+}
+
+export function clearGroupMemories(
+  db: Database,
+  groupFolder: string,
+): number {
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS count FROM group_memories
+       WHERE group_folder = $groupFolder`,
+    )
+    .get({ groupFolder }) as { count: number };
+
+  if (row.count === 0) {
+    return 0;
+  }
+
+  db.query(
+    "DELETE FROM group_memories WHERE group_folder = $groupFolder",
+  ).run({ groupFolder });
+
+  return row.count;
 }
 
 // ---------------------------------------------------------------------------

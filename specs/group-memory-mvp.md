@@ -492,30 +492,30 @@ Group memory:
 ## Todo List
 
 ### Phase 1：数据层
-- [ ] 在 `src/db.ts` 中新增 `group_memories` 表
-- [ ] 新增 group memory CRUD helper
-- [ ] 增加 builtin/custom key 校验辅助逻辑
+- [x] 在 `src/db.ts` 中新增 `group_memories` 表
+- [x] 新增 group memory CRUD helper
+- [x] 增加 builtin/custom key 校验辅助逻辑
 
 ### Phase 2：工具层
-- [ ] 在 `src/tools.ts` 中新增 `remember_group_memory`
-- [ ] 在 `src/tools.ts` 中新增 `list_group_memory`
-- [ ] 在 `src/tools.ts` 中新增 `forget_group_memory`
-- [ ] 在 `src/tools.ts` 中新增 `clear_group_memory`
-- [ ] 实现普通群/主群的权限校验
+- [x] 在 `src/tools.ts` 中新增 `remember_group_memory`
+- [x] 在 `src/tools.ts` 中新增 `list_group_memory`
+- [x] 在 `src/tools.ts` 中新增 `forget_group_memory`
+- [x] 在 `src/tools.ts` 中新增 `clear_group_memory`
+- [x] 实现普通群/主群的权限校验
 
 ### Phase 3：会话注入
-- [ ] 在 `src/group-queue.ts` 中读取 group memory
-- [ ] 在新 session 启动时注入 memory 摘要
-- [ ] 保持 active session follow-up push 逻辑不变
+- [x] 在 `src/group-queue.ts` 中读取 group memory
+- [x] 在新 session 启动时注入 memory 摘要
+- [x] 保持 active session follow-up push 逻辑不变
 
 ### Phase 4：定时任务验证
-- [ ] 验证 scheduler 经过统一 session 启动链路
-- [ ] 确保定时任务也能读取和使用 group memory
-- [ ] 用英语学习群场景补充验收用例
+- [x] 验证 scheduler 经过统一 session 启动链路
+- [x] 确保定时任务也能读取和使用 group memory
+- [x] 用英语学习群场景补充验收用例
 
 ### Phase 5：测试与文档
-- [ ] 增加数据库 CRUD 测试
-- [ ] 增加 memory 工具测试
-- [ ] 增加 session prompt 注入测试
-- [ ] 增加定时任务读取 memory 的测试
-- [ ] 视实现情况更新 README 或 docs/octo.md
+- [x] 增加数据库 CRUD 测试
+- [x] 增加 memory 工具测试
+- [x] 增加 session prompt 注入测试
+- [x] 增加定时任务读取 memory 的测试
+- [x] 视实现情况更新 README 或 docs/octo.md
