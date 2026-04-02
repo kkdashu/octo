@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Channel, ChatInfo } from "./types";
 import { getGroupByJid } from "../db";
 import { log } from "../logger";
@@ -14,6 +15,11 @@ export type OutgoingMessagePart = MessagePart;
 
 export function parseOutgoingMessageParts(text: string): OutgoingMessagePart[] {
   return parseMessageParts(normalizeLegacyImageSyntax(text));
+}
+
+function isEscapedPath(baseDir: string, resolvedPath: string): boolean {
+  const rel = relative(baseDir, resolvedPath);
+  return rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../");
 }
 
 export class ChannelManager {
@@ -47,6 +53,39 @@ export class ChannelManager {
     return fallback;
   }
 
+  private resolveOutgoingAssetPath(chatJid: string, assetPath: string): string {
+    if (isAbsolute(assetPath)) {
+      return assetPath;
+    }
+
+    const normalizedPath = assetPath.trim().replace(/\\/g, "/");
+    if (!normalizedPath) {
+      return assetPath;
+    }
+
+    if (
+      normalizedPath.startsWith("media/") ||
+      normalizedPath.startsWith("groups/")
+    ) {
+      return resolve(normalizedPath);
+    }
+
+    const group = getGroupByJid(this.db, chatJid);
+    if (!group) {
+      return resolve(normalizedPath);
+    }
+
+    const groupWorkdir = resolve("groups", group.folder);
+    const resolvedPath = resolve(groupWorkdir, normalizedPath);
+    if (isEscapedPath(groupWorkdir, resolvedPath)) {
+      throw new Error(
+        `Invalid asset path: must stay within current group directory (${assetPath})`,
+      );
+    }
+
+    return resolvedPath;
+  }
+
   async send(chatJid: string, text: string) {
     log.info(TAG, `Sending message via channel`, {
       chatJid,
@@ -58,15 +97,18 @@ export class ChannelManager {
       const normalizedText = normalizeLegacyImageSyntax(text);
       const parts = parseOutgoingMessageParts(text);
       const hasImages = parts.some((part) => part.type === "image");
+      const hasFiles = parts.some((part) => part.type === "file");
 
-      if (!hasImages) {
+      if (!hasImages && !hasFiles) {
         await channel.sendMessage(chatJid, normalizedText);
         return;
       }
 
-      if (!channel.sendImage) {
-        log.warn(TAG, `Channel ${channel.type} does not support image sending, falling back to raw text`, {
+      if ((hasImages && !channel.sendImage) || (hasFiles && !channel.sendFile)) {
+        log.warn(TAG, `Channel ${channel.type} does not support rich media sending, falling back to raw text`, {
           chatJid,
+          hasImages,
+          hasFiles,
           textPreview: normalizedText.substring(0, 200),
         });
         await channel.sendMessage(chatJid, normalizedText);
@@ -83,8 +125,30 @@ export class ChannelManager {
           continue;
         }
 
+        if (part.type === "file") {
+          try {
+            await channel.sendFile!(
+              chatJid,
+              this.resolveOutgoingAssetPath(chatJid, part.value),
+            );
+          } catch (err) {
+            log.error(TAG, `Failed to send file to chat ${chatJid}`, err);
+            const errorMessage = err instanceof Error ? err.message.trim() : "";
+            await channel.sendMessage(
+              chatJid,
+              errorMessage
+                ? `文件发送失败: ${errorMessage}`
+                : `文件发送失败: ${part.value}`,
+            );
+          }
+          continue;
+        }
+
         try {
-          await channel.sendImage(chatJid, part.value);
+          await channel.sendImage!(
+            chatJid,
+            this.resolveOutgoingAssetPath(chatJid, part.value),
+          );
         } catch (err) {
           log.error(TAG, `Failed to send image to chat ${chatJid}`, err);
           const errorMessage = err instanceof Error ? err.message.trim() : "";

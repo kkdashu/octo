@@ -44,6 +44,12 @@ bun run start
 2. 若未设置，则尝试 `config/agent-profiles.json`
 3. 若仍不存在，则回退到 `config/agent-profiles.example.json`
 
+外部 MCP 配置会按以下顺序读取：
+
+1. `EXTERNAL_MCP_CONFIG_PATH` 指向的配置文件
+2. 若未设置，则尝试 `config/external-mcp.json`
+3. 若仍不存在，则回退到 `config/external-mcp.example.json`
+
 Moonshot/Kimi 线路说明：
 
 - `kimi`：走 `https://api.moonshot.cn/anthropic`
@@ -147,6 +153,74 @@ sqlite3 store/messages.db "UPDATE registered_groups SET agent_provider = 'kimi-c
   }
 }
 ```
+
+外部 MCP 示例见 [config/external-mcp.example.json](/Users/wmeng/work/kkdashu/octo/config/external-mcp.example.json)。
+
+## PDF 转 Markdown
+
+如果你希望某些群支持“接收 PDF，转成 Markdown，再把 `.md` 文件发回飞书”，需要同时完成两步：
+
+1. 在运行 Octo 的机器上安装 `markitdown-mcp`
+2. 只给目标群安装 curated skill `pdf-to-markdown`
+
+### 安装 MarkItDown MCP
+
+可任选一种方式安装：
+
+```bash
+pip install markitdown-mcp
+```
+
+或：
+
+```bash
+uv tool install markitdown-mcp
+```
+
+### 配置外部 MCP
+
+新建 `config/external-mcp.json`，例如：
+
+```json
+{
+  "servers": {
+    "markitdown": {
+      "enabled": true,
+      "command": "markitdown-mcp"
+    }
+  }
+}
+```
+
+如果你更希望按需拉起，也可以改成 `uvx`：
+
+```json
+{
+  "servers": {
+    "markitdown": {
+      "enabled": true,
+      "command": "uvx",
+      "args": ["markitdown-mcp"]
+    }
+  }
+}
+```
+
+### 按群启用
+
+不要把这个能力做成系统 skill。当前实现是按群 gated 的：
+
+1. 在目标群里调用 `install_curated_skill`
+2. 参数传 `skillName = "pdf-to-markdown"`
+3. 该群后续新开的 Claude session 会注入 `markitdown` MCP
+4. 未安装该 skill 的群不会看到也不会拿到这组工具权限
+
+启用后，群里用户把 PDF 发给机器人，并提出“转成 Markdown 发回来”这类请求时，agent 会：
+
+1. 读取消息里的本地文件链接与 `可读路径`
+2. 调用 `mcp__markitdown__convert_to_markdown`
+3. 将结果保存到 `groups/<group-folder>/.generated/documents/`
+4. 通过现有 `send_message` 的 Markdown 文件链接格式把 `.md` 文件发回飞书
 
 ## 技术栈
 

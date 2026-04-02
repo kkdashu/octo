@@ -31,5 +31,6 @@ export interface Channel {
   stop(): Promise<void>;
   sendMessage(chatId: string, text: string): Promise<void>;
   sendImage?(chatId: string, filePath: string): Promise<void>;
+  sendFile?(chatId: string, filePath: string): Promise<void>;
   listChats(): Promise<ChatInfo[]>;
 }

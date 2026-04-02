@@ -369,6 +369,54 @@ describe("Tool definitions", () => {
   });
 });
 
+describe("Claude provider external MCP helpers", () => {
+  test("only exposes built-in MCP server when no external server is configured", () => {
+    const builtInServer = { name: "octo-tools" } as never;
+
+    expect(
+      claudeProviderTestHelpers.buildSessionMcpServers(builtInServer),
+    ).toEqual({
+      "octo-tools": builtInServer,
+    });
+    expect(claudeProviderTestHelpers.buildExternalMcpAllowedTools()).toEqual([]);
+  });
+
+  test("merges external MCP servers and whitelists matching tool namespaces", () => {
+    const builtInServer = { name: "octo-tools" } as never;
+    const externalServers = {
+      markitdown: {
+        command: "markitdown-mcp",
+        args: ["--stdio"],
+      },
+      docs: {
+        command: "docs-mcp",
+      },
+    };
+
+    expect(
+      claudeProviderTestHelpers.buildSessionMcpServers(
+        builtInServer,
+        externalServers,
+      ),
+    ).toEqual({
+      "octo-tools": builtInServer,
+      markitdown: {
+        command: "markitdown-mcp",
+        args: ["--stdio"],
+      },
+      docs: {
+        command: "docs-mcp",
+      },
+    });
+    expect(
+      claudeProviderTestHelpers.buildExternalMcpAllowedTools(externalServers),
+    ).toEqual([
+      "mcp__markitdown__*",
+      "mcp__docs__*",
+    ]);
+  });
+});
+
 describe("Claude provider markdown image content", () => {
   test("uses preprocessed pure text content instead of Read instructions", async () => {
     const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-images-"));
@@ -377,6 +425,7 @@ describe("Claude provider markdown image content", () => {
       const message = await claudeProviderTestHelpers.makeUserMessage(
         "前文\n![image](media/oc_test/om_test.png)\n后文",
         workspaceDir,
+        join(workspaceDir, "groups", "main"),
         {
           preprocess: async (text: string, rootDir: string) => {
             expect(rootDir).toBe(workspaceDir);
@@ -422,6 +471,7 @@ describe("Claude provider markdown image content", () => {
       const message = await claudeProviderTestHelpers.makeUserMessage(
         "旧格式图片：[IMAGE:media/oc_test/om_legacy.png]",
         workspaceDir,
+        join(workspaceDir, "groups", "main"),
         {
           preprocess: async () => {
             throw new Error("preprocess failed");
@@ -432,6 +482,74 @@ describe("Claude provider markdown image content", () => {
       expect(message.message.content).toBe(
         "旧格式图片：![image](media/oc_test/om_legacy.png)",
       );
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("annotates local file links with agent-readable paths", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-files-"));
+    const workingDirectory = join(workspaceDir, "groups", "main");
+
+    try {
+      mkdirSync(workingDirectory, { recursive: true });
+
+      const message = await claudeProviderTestHelpers.makeUserMessage(
+        "请阅读这个文件：[AI素养评价_产品手册.md](media/oc_test/om_1-AI素养评价_产品手册.md)",
+        workspaceDir,
+        workingDirectory,
+        {
+          preprocess: async (text: string) => text,
+        },
+      );
+
+      expect(message.message.content).toContain(
+        "[AI素养评价_产品手册.md](media/oc_test/om_1-AI素养评价_产品手册.md)",
+      );
+      expect(message.message.content).toContain(
+        "可读路径: ../../media/oc_test/om_1-AI素养评价_产品手册.md",
+      );
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps working-directory-relative file links unchanged", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-files-"));
+    const workingDirectory = join(workspaceDir, "groups", "main");
+
+    try {
+      mkdirSync(workingDirectory, { recursive: true });
+
+      const annotated = claudeProviderTestHelpers.annotateLocalFileLinksForAgent(
+        "请发送 [report.pdf](./artifacts/report.pdf)",
+        workspaceDir,
+        workingDirectory,
+      );
+
+      expect(annotated).toBe("请发送 [report.pdf](./artifacts/report.pdf)");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("annotates standalone local file paths so agents can treat them as sendable files", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-provider-files-"));
+    const workingDirectory = join(workspaceDir, "groups", "main");
+    const filePath = join(workingDirectory, ".generated", "documents", "report.md");
+
+    try {
+      mkdirSync(join(workingDirectory, ".generated", "documents"), { recursive: true });
+      writeFileSync(filePath, "# report");
+
+      const annotated = claudeProviderTestHelpers.annotateStandaloneLocalFilePathsForAgent(
+        `${filePath}\n\n把这个文件发给我`,
+        workspaceDir,
+        workingDirectory,
+      );
+
+      expect(annotated).toContain(`[report.md](${filePath})`);
+      expect(annotated).toContain("把这个文件发给我");
     } finally {
       rmSync(workspaceDir, { recursive: true, force: true });
     }

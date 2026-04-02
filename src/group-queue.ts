@@ -1,8 +1,10 @@
 import type { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { listSessions } from "@anthropic-ai/claude-agent-sdk";
 import type { ChannelManager } from "./channels/manager";
 import { resolveAgentProfile } from "./runtime/profile-config";
+import { resolveEnabledExternalMcpServers } from "./runtime/external-mcp-config";
 import type { AgentProvider, AgentSession } from "./providers/types";
 import {
   deleteSessionId,
@@ -35,6 +37,7 @@ const GROUP_MEMORY_POLICY_LINES = [
   "- Example: if the user says future replies should be in English, save response_language = English.",
   "- When the user wants to inspect, update, delete, or clear group memory, use list_group_memory, remember_group_memory, forget_group_memory, or clear_group_memory.",
 ];
+const PDF_TO_MARKDOWN_SKILL_NAME = "pdf-to-markdown";
 
 function normalizeGroupMemoryValue(value: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -113,6 +116,27 @@ export async function resolveClaudeResumeSessionId(
   return sessions.some((session) => session.sessionId === persistedSessionId)
     ? persistedSessionId
     : undefined;
+}
+
+export function isGroupSkillInstalled(
+  groupFolder: string,
+  skillName: string,
+  rootDir = process.cwd(),
+): boolean {
+  return existsSync(
+    resolve(rootDir, "groups", groupFolder, ".claude", "skills", skillName, "SKILL.md"),
+  );
+}
+
+export function buildGroupExternalMcpServers(
+  groupFolder: string,
+  rootDir = process.cwd(),
+): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
+  if (!isGroupSkillInstalled(groupFolder, PDF_TO_MARKDOWN_SKILL_NAME, rootDir)) {
+    return {};
+  }
+
+  return resolveEnabledExternalMcpServers(["markitdown"]);
 }
 
 export class GroupQueue {
@@ -261,6 +285,7 @@ export class GroupQueue {
         resumeSessionId,
         tools,
         profile,
+        externalMcpServers: buildGroupExternalMcpServers(groupFolder),
       });
 
       this.activeSessions.set(groupFolder, session);
@@ -368,6 +393,8 @@ export class GroupQueue {
 }
 
 export const __test__ = {
+  buildGroupExternalMcpServers,
   buildGroupMemoryPromptBlock,
   buildSessionInitialPrompt,
+  isGroupSkillInstalled,
 };

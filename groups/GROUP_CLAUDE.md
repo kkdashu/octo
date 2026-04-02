@@ -71,4 +71,5 @@ Keep messages clean and readable for chat apps:
 - • bullet points
 - ```triple backticks``` for code
 
-No ## headings. No [links](url). No **double stars**.
+No ## headings. No external [links](url). No **double stars**.
+Exception: when sending a local file or local image through tool syntax, you should use local Markdown forms like `[report.pdf](./report.pdf)` or `![image](./image.png)`. These local Markdown paths are required tool input syntax, not normal chat links.

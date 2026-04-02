@@ -1,5 +1,11 @@
 import type { ResolvedAgentProfile } from "../runtime/types";
 
+export interface ExternalMcpServerSpec {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Agent Provider abstraction — unified interface for different AI agent backends
 // ---------------------------------------------------------------------------
@@ -27,6 +33,7 @@ export interface SessionConfig {
   resumeSessionId?: string;
   tools: ToolDefinition[];
   profile: ResolvedAgentProfile;
+  externalMcpServers?: Record<string, ExternalMcpServerSpec>;
 }
 
 /** Platform-agnostic tool definition */

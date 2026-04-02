@@ -165,7 +165,8 @@ export function createGroupToolDefs(
   const commonTools: ToolDefinition[] = [
     {
       name: "send_message",
-      description: "Send a text message to a chat group",
+      description:
+        "Send a message to a chat group. Supports plain text, local Markdown images like ![alt](path.png), and local Markdown file links like [report.pdf](./report.pdf).",
       schema: {
         type: "object",
         properties: {
@@ -173,7 +174,11 @@ export function createGroupToolDefs(
             type: "string",
             description: "Optional target chat ID. Omit it to send back to the current group.",
           },
-          text: { type: "string", description: "Message content" },
+          text: {
+            type: "string",
+            description:
+              "Message content. Supports local Markdown images and local Markdown file links.",
+          },
         },
         required: ["text"],
       },

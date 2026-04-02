@@ -25,7 +25,10 @@ type FeishuMessagePayload = {
   message_type?: string;
   content?: string;
   message_id?: string;
+  chat_id?: string;
   mentions?: unknown;
+  parent_id?: string;
+  root_id?: string;
 };
 
 type FeishuPostContent = {
@@ -48,8 +51,19 @@ type FeishuImageUploadResponse = {
     image_key?: string;
   };
 };
+type FeishuFileUploadResponse = {
+  code?: number;
+  msg?: string;
+  data?: {
+    file_key?: string;
+  };
+};
 type FeishuImageContent = {
   image_key?: unknown;
+};
+type FeishuFileContent = {
+  file_key?: unknown;
+  file_name?: unknown;
 };
 type FeishuResponseHeaderValue = string | string[] | undefined;
 type FeishuResponseHeaders = Record<string, FeishuResponseHeaderValue>;
@@ -57,6 +71,7 @@ type FeishuMessageResourceResponse = {
   writeFile: (filePath: string) => Promise<unknown>;
   headers: FeishuResponseHeaders;
 };
+type FeishuMessageResourceType = "image" | "file";
 type FeishuMessageResourceClient = {
   get: (payload: {
     params: {
@@ -71,7 +86,28 @@ type FeishuMessageResourceClient = {
 type FeishuMessageResourceRequestSummary = {
   message_id: string;
   file_key: string;
-  type: "image";
+  type: FeishuMessageResourceType;
+};
+type FeishuMessageGetResponse = {
+  data?: {
+    items?: unknown;
+  };
+};
+type FeishuMessageGetClient = {
+  get: (payload: {
+    path: {
+      message_id: string;
+    };
+  }) => Promise<FeishuMessageGetResponse>;
+};
+type FeishuMessageGetItemBody = {
+  content?: unknown;
+};
+type FeishuMessageGetItem = {
+  message_id?: unknown;
+  chat_id?: unknown;
+  msg_type?: unknown;
+  body?: unknown;
 };
 type FeishuAxiosLikeResponse = {
   status?: unknown;
@@ -174,17 +210,19 @@ function formatErrorPreviewValue(value: unknown): string | null {
 function buildMessageResourceRequestSummary(
   messageId: string,
   fileKey: string,
+  type: FeishuMessageResourceType = "image",
 ): FeishuMessageResourceRequestSummary {
   return {
     message_id: messageId,
     file_key: fileKey,
-    type: "image",
+    type,
   };
 }
 
 function buildMessageResourceDiagnosisHints(
   feishuCode: number | null,
   hasRemoteResponse: boolean,
+  resourceType: FeishuMessageResourceType,
 ): string[] {
   switch (feishuCode) {
     case 230110:
@@ -192,12 +230,16 @@ function buildMessageResourceDiagnosisHints(
     case 234001:
       return [
         "检查 message_id、file_key、type 是否符合接口文档要求",
-        "若资源来自富文本消息，确认 file_key 使用的是 img 标签中的 image_key",
+        resourceType === "image"
+          ? "若资源来自富文本消息，确认 file_key 使用的是 img 标签中的 image_key"
+          : "若资源来自 file 消息，确认 file_key 使用的是消息内容中的 file_key",
       ];
     case 234003:
       return [
         "file_key 不属于当前 message_id，重点检查两者是否完全匹配",
-        "若消息是富文本 post，确认使用的是该消息内容中的 image_key",
+        resourceType === "image"
+          ? "若消息是富文本 post，确认使用的是该消息内容中的 image_key"
+          : "若消息是 file，确认使用的是该消息内容中的 file_key",
       ];
     case 234004:
       return ["应用不在目标消息所在会话中，需检查 message_id 是否来自当前机器人可见会话"];
@@ -267,6 +309,7 @@ function extractMessageResourceErrorDetails(
     diagnosisHints: buildMessageResourceDiagnosisHints(
       feishuCode,
       hasRemoteResponse,
+      requestSummary.type,
     ),
   };
 }
@@ -541,12 +584,134 @@ function extractImageKeyFromMessage(message: FeishuMessagePayload): string | nul
   return imageKey || null;
 }
 
+function extractFilePayloadFromMessage(
+  message: FeishuMessagePayload,
+): { fileKey: string | null; fileName: string | null } {
+  const parsed = parseFeishuMessageContent(message) as FeishuFileContent | null;
+  const fileKey = typeof parsed?.file_key === "string"
+    ? parsed.file_key.trim()
+    : "";
+  const fileName = typeof parsed?.file_name === "string"
+    ? parsed.file_name.trim()
+    : "";
+
+  return {
+    fileKey: fileKey || null,
+    fileName: fileName || null,
+  };
+}
+
+function readQuotedMessageId(message: FeishuMessagePayload): string | null {
+  const parentId = readStringValue(message.parent_id);
+  const rootId = readStringValue(message.root_id);
+  const currentMessageId = readStringValue(message.message_id);
+  const candidateId = parentId ?? rootId;
+
+  if (!candidateId) {
+    return null;
+  }
+
+  if (currentMessageId && candidateId === currentMessageId) {
+    return null;
+  }
+
+  return candidateId;
+}
+
+function normalizeReferencedMessage(
+  item: unknown,
+  fallbackChatId: string | null = null,
+): FeishuMessagePayload | null {
+  if (!isRecord(item)) {
+    return null;
+  }
+
+  const typedItem = item as FeishuMessageGetItem;
+  const body = isRecord(typedItem.body) ? typedItem.body as FeishuMessageGetItemBody : null;
+  const messageId = readStringValue(typedItem.message_id);
+  const chatId = readStringValue(typedItem.chat_id) ?? fallbackChatId;
+  const messageType = readStringValue(typedItem.msg_type);
+  const content = readStringValue(body?.content);
+
+  if (!messageId || !messageType || !content) {
+    return null;
+  }
+
+  return {
+    message_id: messageId,
+    chat_id: chatId ?? undefined,
+    message_type: messageType,
+    content,
+  };
+}
+
+async function fetchReferencedMessage(
+  messageClient: FeishuMessageGetClient,
+  messageId: string,
+  fallbackChatId: string | null = null,
+): Promise<FeishuMessagePayload | null> {
+  const response = await messageClient.get({
+    path: {
+      message_id: messageId,
+    },
+  });
+  const items = response.data?.items;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return null;
+  }
+
+  return normalizeReferencedMessage(items[0], fallbackChatId);
+}
+
 function buildMarkdownImage(imagePath: string): string {
   return `![image](${imagePath})`;
 }
 
+function buildMarkdownFileLink(fileName: string, filePath: string): string {
+  return `[${fileName}](${filePath})`;
+}
+
 function buildImageDownloadFailureText(imageKey: string): string {
   return `[图片下载失败:image_key=${imageKey}]`;
+}
+
+function buildFileDownloadFailureText(
+  fileKey: string,
+  fileName: string | null,
+): string {
+  const normalizedFileName = fileName?.trim();
+  return normalizedFileName
+    ? `[文件下载失败:file_key=${fileKey},file_name=${normalizedFileName}]`
+    : `[文件下载失败:file_key=${fileKey}]`;
+}
+
+function buildReferencedFileMessageContent(params: {
+  referencedFileMarkdown: string;
+  currentText: string | null;
+}): string {
+  const blocks = [
+    "引用文件：",
+    params.referencedFileMarkdown,
+  ];
+  const normalizedCurrentText = normalizeExtractedContent(params.currentText ?? "");
+
+  if (!normalizedCurrentText) {
+    return blocks.join("\n");
+  }
+
+  blocks.push("", "当前消息：", normalizedCurrentText);
+  return blocks.join("\n");
+}
+
+function sanitizeIncomingFileName(fileName: string | null): string {
+  const normalizedFileName = (fileName ?? "")
+    .trim()
+    .replace(/[\\/]+/g, "_")
+    .replace(/[^\w.\-() \u4e00-\u9fff]+/g, "_")
+    .replace(/\s+/g, " ");
+
+  return normalizedFileName || "unnamed.bin";
 }
 
 function inferImageExtension(contentType: string | null): string {
@@ -609,10 +774,31 @@ async function downloadIncomingImageResource(
     rootDir?: string;
   },
 ): Promise<string> {
+  return downloadIncomingMessageResource(messageResourceClient, {
+    messageId: params.messageId,
+    fileKey: params.imageKey,
+    chatId: params.chatId,
+    resourceType: "image",
+    rootDir: params.rootDir,
+  });
+}
+
+async function downloadIncomingMessageResource(
+  messageResourceClient: FeishuMessageResourceClient,
+  params: {
+    messageId: string;
+    fileKey: string;
+    chatId: string;
+    resourceType: FeishuMessageResourceType;
+    preferredFileName?: string | null;
+    rootDir?: string;
+  },
+): Promise<string> {
   const rootDir = params.rootDir ?? process.cwd();
   const requestSummary = buildMessageResourceRequestSummary(
     params.messageId,
-    params.imageKey,
+    params.fileKey,
+    params.resourceType,
   );
   let response: FeishuMessageResourceResponse;
 
@@ -620,10 +806,10 @@ async function downloadIncomingImageResource(
     response = await messageResourceClient.get({
       path: {
         message_id: params.messageId,
-        file_key: params.imageKey,
+        file_key: params.fileKey,
       },
       params: {
-        type: "image",
+        type: params.resourceType,
       },
     });
   } catch (err) {
@@ -632,14 +818,18 @@ async function downloadIncomingImageResource(
     );
   }
 
-  const extension = inferImageExtension(
-    readHeaderValue(response.headers, "content-type"),
-  );
   const relativeDirectory = posix.join("media", params.chatId);
-  const relativeFilePath = posix.join(
-    relativeDirectory,
-    `${params.messageId}${extension}`,
-  );
+  const relativeFilePath = params.resourceType === "image"
+    ? posix.join(
+        relativeDirectory,
+        `${params.messageId}${inferImageExtension(
+          readHeaderValue(response.headers, "content-type"),
+        )}`,
+      )
+    : posix.join(
+        relativeDirectory,
+        `${params.messageId}-${sanitizeIncomingFileName(params.preferredFileName ?? null)}`,
+      );
   const absoluteDirectory = resolve(rootDir, relativeDirectory);
   const absoluteFilePath = resolve(rootDir, relativeFilePath);
 
@@ -672,6 +862,37 @@ function inferImageMimeType(filePath: string): string {
   if (normalizedPath.endsWith(".webp")) return "image/webp";
   if (normalizedPath.endsWith(".gif")) return "image/gif";
   return "application/octet-stream";
+}
+
+function inferFeishuFileType(filePath: string): string {
+  const fileName = basename(filePath).trim();
+  const lastDotIndex = fileName.lastIndexOf(".");
+  if (lastDotIndex <= 0 || lastDotIndex === fileName.length - 1) {
+    return "stream";
+  }
+
+  const extension = fileName.slice(lastDotIndex + 1).trim().toLowerCase();
+  if (!extension) {
+    return "stream";
+  }
+
+  switch (extension) {
+    case "opus":
+    case "mp4":
+    case "pdf":
+      return extension;
+    case "doc":
+    case "docx":
+      return "doc";
+    case "xls":
+    case "xlsx":
+      return "xls";
+    case "ppt":
+    case "pptx":
+      return "ppt";
+    default:
+      return "stream";
+  }
 }
 
 async function getTenantAccessToken(
@@ -743,6 +964,48 @@ async function uploadImageWithFetch(
   }
 
   return imageKey;
+}
+
+async function uploadFileWithFetch(
+  config: Pick<FeishuChannelConfig, "appId" | "appSecret">,
+  filePath: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const token = await getTenantAccessToken(config, fetchImpl);
+  const fileBuffer = readFileSync(filePath);
+  const fileName = basename(filePath) || "file";
+  const form = new FormData();
+  form.append("file_type", inferFeishuFileType(filePath));
+  form.append("file_name", fileName);
+  form.append(
+    "file",
+    new Blob([fileBuffer], { type: "application/octet-stream" }),
+    fileName,
+  );
+
+  const response = await fetchImpl(
+    "https://open.feishu.cn/open-apis/im/v1/files",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: form,
+    },
+  );
+
+  const payload = await parseJsonResponse<FeishuFileUploadResponse>(
+    response,
+    "im/v1/files",
+  );
+  const fileKey = payload.data?.file_key;
+  if (payload.code !== 0 || !fileKey) {
+    throw new Error(
+      `Failed to upload file: code=${payload.code ?? "unknown"}, msg=${payload.msg ?? "unknown"}, filePath=${filePath}`,
+    );
+  }
+
+  return fileKey;
 }
 
 export class FeishuChannel implements Channel {
@@ -898,6 +1161,42 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  async sendFile(chatId: string, filePath: string) {
+    log.info(TAG, `Sending file to chat ${chatId}`, {
+      chatId,
+      filePath,
+    });
+
+    try {
+      const fileSize = statSync(filePath).size;
+      if (fileSize <= 0) {
+        throw new Error(`File is empty: ${filePath}`);
+      }
+
+      const fileKey = await uploadFileWithFetch(this.config, filePath);
+
+      await this.client.im.message.create({
+        params: {
+          receive_id_type: "chat_id",
+        },
+        data: {
+          receive_id: chatId,
+          content: JSON.stringify({ file_key: fileKey }),
+          msg_type: "file",
+        },
+      });
+
+      log.debug(TAG, "File sent successfully", {
+        chatId,
+        filePath,
+        fileKey,
+      });
+    } catch (err) {
+      log.error(TAG, `Failed to send file to chat ${chatId}`, err);
+      throw err;
+    }
+  }
+
   async listChats(): Promise<ChatInfo[]> {
     log.info(TAG, "Fetching chat list from Feishu");
     const chats: ChatInfo[] = [];
@@ -999,23 +1298,77 @@ export class FeishuChannel implements Channel {
   }
 
   private async extractIncomingContent(
-    message: {
-      message_id?: string;
-      chat_id?: string;
-      message_type?: string;
-      content?: string;
-      mentions?: unknown;
-    },
+    message: FeishuMessagePayload,
   ): Promise<string | null> {
     if (message?.message_type === "image") {
       return this.extractImageContent(message);
+    }
+
+    if (message?.message_type === "file") {
+      return this.extractFileContent(message);
     }
 
     if (message?.message_type === "post") {
       return this.extractPostContent(message);
     }
 
+    if (message?.message_type === "text") {
+      const currentText = this.extractTextContent(message);
+      const referencedFileMarkdown = await this.resolveReferencedFileContent(
+        message,
+      );
+
+      return referencedFileMarkdown
+        ? buildReferencedFileMessageContent({
+            referencedFileMarkdown,
+            currentText,
+          })
+        : currentText;
+    }
+
     return this.extractTextContent(message);
+  }
+
+  private async resolveReferencedFileContent(
+    message: FeishuMessagePayload,
+  ): Promise<string | null> {
+    const referencedMessageId = readQuotedMessageId(message);
+    if (!referencedMessageId) {
+      return null;
+    }
+
+    try {
+      const referencedMessage = await fetchReferencedMessage(
+        this.client.im.message as FeishuMessageGetClient,
+        referencedMessageId,
+        readStringValue(message.chat_id),
+      );
+      if (!referencedMessage) {
+        log.debug(TAG, "Referenced message not found or invalid", {
+          messageId: message.message_id,
+          referencedMessageId,
+        });
+        return null;
+      }
+
+      if (referencedMessage.message_type !== "file") {
+        log.debug(TAG, "Referenced message is not a file", {
+          messageId: message.message_id,
+          referencedMessageId,
+          referencedMessageType: referencedMessage.message_type,
+        });
+        return null;
+      }
+
+      return this.extractFileContent(referencedMessage);
+    } catch (err) {
+      log.warn(TAG, "Failed to resolve referenced file message", {
+        messageId: message.message_id,
+        referencedMessageId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   private async extractPostContent(
@@ -1043,6 +1396,7 @@ export class FeishuChannel implements Channel {
           const requestSummary = buildMessageResourceRequestSummary(
             messageId,
             imageKey,
+            "image",
           );
 
           try {
@@ -1118,6 +1472,7 @@ export class FeishuChannel implements Channel {
     const requestSummary = buildMessageResourceRequestSummary(
       messageId,
       imageKey,
+      "image",
     );
 
     try {
@@ -1140,6 +1495,80 @@ export class FeishuChannel implements Channel {
     }
   }
 
+  private async extractFileContent(
+    message: {
+      message_id?: string;
+      chat_id?: string;
+      content?: string;
+    },
+  ): Promise<string | null> {
+    const messageId = typeof message.message_id === "string"
+      ? message.message_id.trim()
+      : "";
+    const chatId = typeof message.chat_id === "string"
+      ? message.chat_id.trim()
+      : "";
+
+    if (!messageId || !chatId) {
+      log.warn(TAG, "File message missing message_id or chat_id", {
+        messageId: message.message_id,
+        chatId: message.chat_id,
+      });
+      return null;
+    }
+
+    let fileKey: string | null = null;
+    let fileName: string | null = null;
+    try {
+      ({ fileKey, fileName } = extractFilePayloadFromMessage(message));
+    } catch {
+      log.warn(TAG, "Failed to parse file message content JSON", {
+        messageId,
+        content: message.content,
+      });
+      return null;
+    }
+
+    if (!fileKey) {
+      log.warn(TAG, "File message missing file_key", {
+        messageId,
+        chatId,
+        content: message.content,
+      });
+      return null;
+    }
+
+    const requestSummary = buildMessageResourceRequestSummary(
+      messageId,
+      fileKey,
+      "file",
+    );
+
+    try {
+      const relativeFilePath = await downloadIncomingMessageResource(
+        this.client.im.messageResource as FeishuMessageResourceClient,
+        {
+          messageId,
+          fileKey,
+          chatId,
+          resourceType: "file",
+          preferredFileName: fileName,
+        },
+      );
+
+      return buildMarkdownFileLink(
+        sanitizeIncomingFileName(fileName),
+        relativeFilePath,
+      );
+    } catch (err) {
+      log.error(TAG, "Failed to download incoming file message", {
+        ...extractMessageResourceErrorDetails(err, requestSummary),
+        chatId,
+      });
+      return buildFileDownloadFailureText(fileKey, fileName);
+    }
+  }
+
   private checkMentionsMe(message: any): boolean {
     if (!message.mentions) return false;
     const result = message.mentions.some(
@@ -1155,20 +1584,31 @@ export class FeishuChannel implements Channel {
 }
 
 export const __test__ = {
+  buildReferencedFileMessageContent,
+  buildFileDownloadFailureText,
   buildImageDownloadFailureText,
+  buildMarkdownFileLink,
   buildMarkdownImage,
   buildMessageResourceDiagnosisHints,
   buildMessageResourceRequestSummary,
+  downloadIncomingMessageResource,
   downloadIncomingImageResource,
+  extractFilePayloadFromMessage,
   extractImageKeyFromMessage,
   extractMessageResourceErrorDetails,
   extractFeishuMessageContent,
   extractPostMessageContentWithImages,
+  fetchReferencedMessage,
   getTenantAccessToken,
+  inferFeishuFileType,
   inferImageExtension,
   normalizeExtractedContent,
+  normalizeReferencedMessage,
+  readQuotedMessageId,
   renderPostParagraphWithImages,
   replaceMentionKeysWithNames,
   renderPostParagraph,
+  sanitizeIncomingFileName,
+  uploadFileWithFetch,
   uploadImageWithFetch,
 };

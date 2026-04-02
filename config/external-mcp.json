@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "markitdown": {
+      "enabled": true,
+      "command": "/Users/wmeng/work/kkdashu/octo/.venv-markitdown/bin/markitdown-mcp",
+      "args": []
+    }
+  }
+}

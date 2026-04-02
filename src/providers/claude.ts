@@ -1,11 +1,15 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 
 import { log } from "../logger";
-import { normalizeLegacyImageSyntax } from "../message-parts";
+import {
+  isLocalMarkdownLinkTarget,
+  normalizeLegacyImageSyntax,
+} from "../message-parts";
 import { AnthropicLoggingProxyManager } from "../runtime/anthropic-logging-proxy";
 import type { ImageMessagePreprocessor } from "../runtime/image-message-preprocessor";
 import { buildClaudeSdkEnv } from "../runtime/profile-config";
@@ -16,6 +20,7 @@ import type {
   AgentEvent,
   SessionConfig,
   ToolDefinition,
+  ExternalMcpServerSpec,
 } from "./types";
 
 const TAG = "claude-provider";
@@ -27,6 +32,7 @@ const TAG = "claude-provider";
 async function makeUserMessage(
   text: string,
   rootDir: string,
+  workingDirectory: string,
   imageMessagePreprocessor: ImageMessagePreprocessor,
 ): Promise<SDKUserMessage> {
   let processedContent = normalizeLegacyImageSyntax(text);
@@ -43,6 +49,12 @@ async function makeUserMessage(
     }
   }
 
+  processedContent = annotateLocalFileLinksForAgent(
+    processedContent,
+    rootDir,
+    workingDirectory,
+  );
+
   const message = {
     role: "user" as const,
     content: processedContent,
@@ -58,6 +70,175 @@ async function makeUserMessage(
 
 function filterInternalContent(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, "").trim();
+}
+
+function buildSessionMcpServers(
+  builtInMcpServer: ReturnType<typeof buildMcpServer>,
+  externalMcpServers?: Record<string, ExternalMcpServerSpec>,
+): Record<string, unknown> {
+  return {
+    "octo-tools": builtInMcpServer,
+    ...(externalMcpServers ?? {}),
+  };
+}
+
+function buildExternalMcpAllowedTools(
+  externalMcpServers?: Record<string, ExternalMcpServerSpec>,
+): string[] {
+  return Object.keys(externalMcpServers ?? {}).map(
+    (serverName) => `mcp__${serverName}__*`,
+  );
+}
+
+function toPosixPath(filePath: string): string {
+  return filePath.replace(/\\/g, "/");
+}
+
+function resolveAgentReadablePath(
+  rawPath: string,
+  rootDir: string,
+  workingDirectory: string,
+): string {
+  if (isAbsolute(rawPath)) {
+    return toPosixPath(rawPath);
+  }
+
+  const normalizedPath = rawPath.trim().replace(/\\/g, "/");
+  if (!normalizedPath) {
+    return rawPath;
+  }
+
+  const absolutePath =
+    normalizedPath.startsWith("media/") || normalizedPath.startsWith("groups/")
+      ? resolve(rootDir, normalizedPath)
+      : resolve(workingDirectory, normalizedPath);
+  const relativePath = relative(workingDirectory, absolutePath);
+  const normalizedRelativePath = toPosixPath(relativePath || ".");
+
+  return normalizedRelativePath.startsWith(".")
+    ? normalizedRelativePath
+    : `./${normalizedRelativePath}`;
+}
+
+function formatAnnotatedFileLink(
+  label: string,
+  rawPath: string,
+  agentReadablePath: string,
+): string {
+  const normalizedLabel = label.trim() || basename(rawPath) || "file";
+  const markdownLink = `[${normalizedLabel}](${rawPath})`;
+  if (agentReadablePath === rawPath) {
+    return markdownLink;
+  }
+
+  return `${markdownLink}\n可读路径: ${agentReadablePath}`;
+}
+
+function isExistingLocalFilePath(
+  rawPath: string,
+  rootDir: string,
+  workingDirectory: string,
+): boolean {
+  if (!isLocalMarkdownLinkTarget(rawPath)) {
+    return false;
+  }
+
+  const normalizedPath = rawPath.trim().replace(/\\/g, "/");
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const absolutePath = isAbsolute(normalizedPath)
+    ? normalizedPath
+    : normalizedPath.startsWith("media/") || normalizedPath.startsWith("groups/")
+      ? resolve(rootDir, normalizedPath)
+      : resolve(workingDirectory, normalizedPath);
+
+  if (!existsSync(absolutePath)) {
+    return false;
+  }
+
+  try {
+    return statSync(absolutePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function annotateStandaloneLocalFilePathsForAgent(
+  text: string,
+  rootDir: string,
+  workingDirectory: string,
+): string {
+  const lines = text.split("\n");
+  let changed = false;
+
+  const annotatedLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("[") || trimmed.startsWith("![")) {
+      return line;
+    }
+
+    if (!isExistingLocalFilePath(trimmed, rootDir, workingDirectory)) {
+      return line;
+    }
+
+    changed = true;
+    return formatAnnotatedFileLink(
+      basename(trimmed),
+      trimmed,
+      resolveAgentReadablePath(trimmed, rootDir, workingDirectory),
+    );
+  });
+
+  return changed ? annotatedLines.join("\n") : text;
+}
+
+function annotateLocalFileLinksForAgent(
+  text: string,
+  rootDir: string,
+  workingDirectory: string,
+): string {
+  if (!text) {
+    return text;
+  }
+
+  const linkRe = /\[([^\]]*)\]\(([^)\n]+)\)/g;
+  let result = "";
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(linkRe)) {
+    const start = match.index ?? 0;
+    const matchedText = match[0] ?? "";
+    if (start > 0 && text[start - 1] === "!") {
+      continue;
+    }
+
+    const label = (match[1] ?? "").trim();
+    const rawPath = (match[2] ?? "").trim();
+    if (!rawPath || !isLocalMarkdownLinkTarget(rawPath)) {
+      continue;
+    }
+
+    result += text.slice(lastIndex, start);
+    result += formatAnnotatedFileLink(
+      label,
+      rawPath,
+      resolveAgentReadablePath(rawPath, rootDir, workingDirectory),
+    );
+    lastIndex = start + matchedText.length;
+  }
+
+  if (lastIndex === 0) {
+    return text;
+  }
+
+  result += text.slice(lastIndex);
+  return annotateStandaloneLocalFilePathsForAgent(
+    result,
+    rootDir,
+    workingDirectory,
+  );
 }
 
 /** Convert platform-agnostic ToolDefinitions into a Claude SDK MCP server */
@@ -197,6 +378,7 @@ export class ClaudeProvider implements AgentProvider {
       yield await makeUserMessage(
         initialPrompt,
         projectRoot,
+        groupWorkdir,
         imageMessagePreprocessor,
       );
       while (true) {
@@ -211,6 +393,7 @@ export class ClaudeProvider implements AgentProvider {
         yield await makeUserMessage(
           msg,
           projectRoot,
+          groupWorkdir,
           imageMessagePreprocessor,
         );
       }
@@ -229,10 +412,18 @@ export class ClaudeProvider implements AgentProvider {
     // Build MCP tools
     const mcpServer = buildMcpServer(config.tools);
     const toolNames = config.tools.map((t) => `mcp__octo-tools__${t.name}`);
+    const externalMcpAllowedTools = buildExternalMcpAllowedTools(
+      config.externalMcpServers,
+    );
+    const sessionMcpServers = buildSessionMcpServers(
+      mcpServer,
+      config.externalMcpServers,
+    );
 
     const allowedTools = [
       "Read", "Edit", "Write", "Glob", "Grep", "Bash", "Skill",
       ...toolNames,
+      ...externalMcpAllowedTools,
     ];
 
     const proxyRoute =
@@ -255,7 +446,7 @@ export class ClaudeProvider implements AgentProvider {
       options: {
         model: config.profile.model,
         settingSources: ["project"],
-        mcpServers: { "octo-tools": mcpServer },
+        mcpServers: sessionMcpServers,
         allowedTools,
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
@@ -319,5 +510,10 @@ export class ClaudeProvider implements AgentProvider {
 }
 
 export const __test__ = {
+  annotateLocalFileLinksForAgent,
+  annotateStandaloneLocalFilePathsForAgent,
+  buildExternalMcpAllowedTools,
+  buildSessionMcpServers,
   makeUserMessage,
+  resolveAgentReadablePath,
 };
