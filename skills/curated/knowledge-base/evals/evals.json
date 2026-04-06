@@ -1,0 +1,26 @@
+{
+  "skill_name": "knowledge-base",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我把 raw/ 目录下的资料编译成一个结构化的 wiki。请先看看 raw/ 里有什么资料，然后创建完整的 wiki 目录结构，包括索引文件、概念文章、参考文档等。",
+      "expected_output": "在 wiki/ 目录下创建完整的结构：index.md、concepts/、topics/、references/ 以及各自的 _index.md 文件，概念文章包含 wiki 模板格式，有 backlink 和 source references",
+      "files": ["evals/kb-test-workspace/"],
+      "eval_name": "compile-wiki"
+    },
+    {
+      "id": 2,
+      "prompt": "raw/ 目录下有关于 RAG 和 LLM Agents 的资料。请问：当我有 100-400K 字规模的知识库时，应该用 RAG 还是 long context？LLM Agents 的核心挑战是什么？",
+      "expected_output": "一个结构化的 Q&A 回答，引用了 raw/ 中的具体资料，有 Confidence 标注，并建议将回答保存回 wiki",
+      "files": ["evals/kb-test-workspace/"],
+      "eval_name": "qa-against-raw"
+    },
+    {
+      "id": 3,
+      "prompt": "我已经在 wiki/ 目录里建立了一个关于 AI 研究的 wiki。请对这个 wiki 做一次健康检查，找出：1) 是否有矛盾的内容，2) 是否有孤立文章（没有被引用），3) 索引文件是否准确，4) 有哪些可以改进的地方。",
+      "expected_output": "一份结构化的健康检查报告，包含 Consistency、Completeness、Structure 三个维度的问题列表，以及具体的改进建议",
+      "files": ["evals/kb-test-workspace/"],
+      "eval_name": "wiki-health-check"
+    }
+  ]
+}
