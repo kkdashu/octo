@@ -1,16 +1,16 @@
-# 清空上下文功能
+# 清理 Session / 清理会话 功能
 
 ## 问题描述
 
-用户需要一种方式来清空某个群的对话上下文，让 AI 从空白状态开始新的对话。
+用户需要一种方式来清理某个群的 AI session，让 AI 从新的 session 开始后续对话。
 
 Claude Agent SDK 支持 `/clear` slash command，用于清除对话历史并开启新 session。
 
 ## 需求
 
-1. 只有主群可以执行清空上下文操作
-2. 主群可以说"清空 xxx 群的上下文"
-3. 被清空上下文的群会丢失之前的对话历史，下次消息会启动新 session
+1. 只有主群可以执行清理 session 操作
+2. 主群可以说"清理 xxx 群的 session"或"清理 xxx 群的会话"
+3. 被清理 session 的群会丢失之前的 session 历史，下次消息会启动新 session
 
 ## 对现有项目的影响
 
@@ -85,7 +85,7 @@ AI 识别意图 → 调用 clear_context 工具
 clear_context:
   1. 验证 test-group 存在
   2. 调用 sender.clearSession("test-group")
-  3. 返回 "test-group 的上下文已清空"
+  3. 返回 "test-group 的 session 已清理"
 
 sender.clearSession:
   1. deleteSessionId(db, "test-group")
@@ -102,4 +102,4 @@ test-group 下次发消息:
 - [ ] 扩展 `MessageSender` 接口，添加 `clearSession` 方法
 - [ ] 在 `GroupQueue` 中实现 `clearSession` 方法
 - [ ] 在 `tools.ts` 中添加 `clear_context` 工具
-- [ ] 测试：清空上下文后，目标群启动新 session
+- [ ] 测试：清理 session 后，目标群启动新 session

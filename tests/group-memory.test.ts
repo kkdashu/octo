@@ -251,10 +251,15 @@ describe("group memory tools", () => {
     expect(ownList.content[0]?.text).toContain("topic_context");
 
     const mainTools = createGroupToolDefs("main", true, db, sender, dir);
+    const mainClearSession = mainTools.find((tool) => tool.name === "clear_session");
+    const mainClearContext = mainTools.find((tool) => tool.name === "clear_context");
     const mainRemember = mainTools.find((tool) => tool.name === "remember_group_memory");
     const mainList = mainTools.find((tool) => tool.name === "list_group_memory");
     const mainForget = mainTools.find((tool) => tool.name === "forget_group_memory");
     const mainClear = mainTools.find((tool) => tool.name === "clear_group_memory");
+
+    expect(mainClearSession?.description).toContain("Clear only the AI session");
+    expect(mainClearContext?.description).toContain("Compatibility alias");
 
     await mainRemember!.handler({
       targetGroupFolder: "other-group",
@@ -287,6 +292,41 @@ describe("group memory tools", () => {
       mainClear!.handler({ targetGroupFolder: "other-group" }),
     ).resolves.toEqual({
       content: [{ type: "text", text: 'Cleared 1 group memory item(s) for "Other Group" (other-group).' }],
+    });
+
+    const clearSender = {
+      ...sender,
+      clearSession: async () => ({
+        closedActiveSession: true,
+        previousSessionId: "old-session",
+        sessionId: "fresh-session",
+        generation: 2,
+      }),
+    };
+    const clearTools = createGroupToolDefs("main", true, db, clearSender, dir);
+    const clearSession = clearTools.find((tool) => tool.name === "clear_session");
+    const clearContext = clearTools.find((tool) => tool.name === "clear_context");
+
+    await expect(
+      clearSession!.handler({ targetGroupFolder: "other-group" }),
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: 'Session cleared for group "Other Group" (other-group). A fresh Claude session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
+        },
+      ],
+    });
+
+    await expect(
+      clearContext!.handler({ targetGroupFolder: "other-group" }),
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: 'Session cleared for group "Other Group" (other-group). A fresh Claude session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
+        },
+      ],
     });
   });
 });
@@ -404,5 +444,55 @@ describe("group memory prompt injection", () => {
     expect(sessionConfig.initialPrompt).toContain("Custom study_goal: 重点提升英语口语");
     expect(sessionConfig.initialPrompt).toContain("[Scheduled Task");
     expect(sessionConfig.initialPrompt).toContain("请发送今日英语练习");
+  });
+});
+
+describe("clear session concurrency protection", () => {
+  test("does not let a stale run overwrite the freshly cleared session id", async () => {
+    const { dir, db } = createWorkspace();
+    cleanupDirs.push(dir);
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+
+    let releaseResult!: () => void;
+    const resultReleased = new Promise<void>((resolve) => {
+      releaseResult = resolve;
+    });
+
+    const provider: AgentProvider = {
+      name: "mock",
+      startSession: async () => ({
+        session: {
+          push: () => {},
+          close: () => {},
+        },
+        events: (async function* () {
+          await resultReleased;
+          yield { type: "result" as const, sessionId: "stale-session" };
+        })(),
+      }),
+      clearContext: async () => ({ sessionId: "fresh-session" }),
+    };
+
+    const groupQueue = new GroupQueue(
+      db,
+      createFakeChannelManager(),
+      provider,
+      1,
+    );
+
+    await groupQueue.enqueue(
+      "main",
+      "[2026-04-10T10:00:00.000Z] Alice: 你好",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const clearResult = await groupQueue.clearSession("main");
+    expect(clearResult.sessionId).toBe("fresh-session");
+    expect(getSessionId(db, "main")).toBe("fresh-session");
+
+    releaseResult();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getSessionId(db, "main")).toBe("fresh-session");
   });
 });
