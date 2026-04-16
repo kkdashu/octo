@@ -38,6 +38,14 @@ Use group memory tools for durable group preferences, long-term rules, and recur
 - Only use a custom key when no builtin key can express the memory.
 - Use `mcp__octo-tools__list_group_memory` to inspect memory, `mcp__octo-tools__forget_group_memory` to delete one item, and `mcp__octo-tools__clear_group_memory` to clear all memory.
 
+## Session Clearing
+
+- Prefer the wording "clear session" / "清理会话" / "清理 session" when referring to this action.
+- If the user asks to clear the session, or says "清理会话" / "清理 session", treat it as meaning: clear only the AI session.
+- To do that, you must call `mcp__octo-tools__clear_session` before replying.
+- Do not claim the session was cleared unless the tool call succeeded.
+- Do not imply that group memory, pending messages, or files were cleared.
+
 ## Formatting
 
 Keep messages clean and readable. Use:
@@ -71,6 +79,8 @@ Main group has access to these MCP tools:
 | `mcp__octo-tools__list_group_memory` | List long-term group memory for the current group, or another group when needed |
 | `mcp__octo-tools__forget_group_memory` | Delete one long-term group memory item from the current group, or another group when needed |
 | `mcp__octo-tools__clear_group_memory` | Clear all long-term group memory for the current group, or another group when needed |
+| `mcp__octo-tools__clear_session` | Clear only the AI session for the current group, or another group when needed |
+| `mcp__octo-tools__clear_context` | Compatibility alias for clear_session |
 | `mcp__octo-tools__list_groups` | List all registered groups |
 | `mcp__octo-tools__register_group` | Register a new group |
 | `mcp__octo-tools__refresh_groups` | Refresh group metadata from Feishu |

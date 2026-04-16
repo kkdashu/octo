@@ -38,7 +38,12 @@ export interface MessageSender {
   send(chatJid: string, text: string): Promise<void>;
   sendImage(chatJid: string, filePath: string): Promise<void>;
   refreshGroupMetadata(): Promise<{ count: number }>;
-  clearSession?(groupFolder: string): Promise<{ closedActiveSession: boolean; sessionId: string }>;
+  clearSession?(groupFolder: string): Promise<{
+    closedActiveSession: boolean;
+    previousSessionId: string | null;
+    sessionId: string;
+    generation: number;
+  }>;
 }
 
 type ResolveTargetChatResult =
@@ -116,6 +121,38 @@ function resolveTargetGroup(
 
 function formatGroupLabel(group: RegisteredGroup): string {
   return `"${group.name}" (${group.folder})`;
+}
+
+async function handleClearSessionTool(
+  db: Database,
+  sender: MessageSender,
+  targetGroupFolder: string,
+  toolName: string,
+) {
+  log.info(TAG, `[${toolName}] called by main group`, { folder: targetGroupFolder });
+  const target = getGroupByFolder(db, targetGroupFolder);
+  if (!target) {
+    log.warn(TAG, `[${toolName}] Target group not found: ${targetGroupFolder}`);
+    return { content: [{ type: "text", text: `Group not found: ${targetGroupFolder}` }] };
+  }
+  if (!sender.clearSession) {
+    log.error(TAG, `[${toolName}] clearSession not available in sender`);
+    return { content: [{ type: "text", text: "Clear session not supported" }] };
+  }
+
+  const result = await sender.clearSession(targetGroupFolder);
+  log.info(TAG, `[${toolName}] Session cleared for ${targetGroupFolder}`, result);
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: result.closedActiveSession
+          ? `Session cleared for group ${formatGroupLabel(target)}. A fresh Claude session (${result.sessionId}) is ready, and the previous active session was closed. This only clears the AI session.`
+          : `Session cleared for group ${formatGroupLabel(target)}. A fresh Claude session (${result.sessionId}) is ready for the next message. This only clears the AI session.`,
+      },
+    ],
+  };
 }
 
 function formatGroupMemoryList(
@@ -813,8 +850,8 @@ export function createGroupToolDefs(
           },
         },
         {
-          name: "clear_context",
-          description: "Clear conversation context for a target group. This deletes the session and the group will start fresh on next message.",
+          name: "clear_session",
+          description: "Clear only the AI session for a target group. This does not clear group memory, pending messages, or files.",
           schema: {
             type: "object",
             properties: {
@@ -822,31 +859,32 @@ export function createGroupToolDefs(
             },
             required: ["targetGroupFolder"],
           },
-          handler: async (args) => {
-            const folder = args.targetGroupFolder as string;
-            log.info(TAG, `[clear_context] called by main group`, { folder });
-            const target = getGroupByFolder(db, folder);
-            if (!target) {
-              log.warn(TAG, `[clear_context] Target group not found: ${folder}`);
-              return { content: [{ type: "text", text: `Group not found: ${folder}` }] };
-            }
-            if (!sender.clearSession) {
-              log.error(TAG, `[clear_context] clearSession not available in sender`);
-              return { content: [{ type: "text", text: "Clear session not supported" }] };
-            }
-            const result = await sender.clearSession(folder);
-            log.info(TAG, `[clear_context] Context cleared for ${folder}`, result);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: result.closedActiveSession
-                    ? `Context cleared for group "${target.name}" (${folder}). A fresh Claude session (${result.sessionId}) is ready, and the active session was closed.`
-                    : `Context cleared for group "${target.name}" (${folder}). A fresh Claude session (${result.sessionId}) is ready for the next message.`,
-                },
-              ],
-            };
+          handler: async (args) =>
+            handleClearSessionTool(
+              db,
+              sender,
+              args.targetGroupFolder as string,
+              "clear_session",
+            ),
+        },
+        {
+          name: "clear_context",
+          description:
+            "Compatibility alias for clear_session. This only clears the AI session for a target group.",
+          schema: {
+            type: "object",
+            properties: {
+              targetGroupFolder: { type: "string", description: "Target group folder name" },
+            },
+            required: ["targetGroupFolder"],
           },
+          handler: async (args) =>
+            handleClearSessionTool(
+              db,
+              sender,
+              args.targetGroupFolder as string,
+              "clear_context",
+            ),
         },
       ]
     : [];

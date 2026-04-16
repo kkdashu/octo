@@ -50,6 +50,14 @@ export function formatMessagesAsPrompt(messages: MessageRow[]): string {
     .join("\n");
 }
 
+export function isClearSessionCommand(message: MessageRow): boolean {
+  return message.content.trim() === "/clear";
+}
+
+function buildClearSessionSystemReply(): string {
+  return "Session 已清理。仅清理 AI session；group memory、待处理消息和文件不会被清理。";
+}
+
 // ---------------------------------------------------------------------------
 // Message loop
 // ---------------------------------------------------------------------------
@@ -74,7 +82,7 @@ export function startMessageLoop(
 
 function processMessages(
   db: Database,
-  _channelManager: ChannelManager,
+  channelManager: ChannelManager,
   groupQueue: GroupQueue,
 ) {
   const groups = listGroups(db);
@@ -87,18 +95,45 @@ function processMessages(
     const messages = getUnprocessedMessages(db, group.jid, lastTimestamp);
     if (messages.length === 0) continue;
 
-    log.info(TAG, `Found ${messages.length} new messages for group ${group.folder} (${group.jid})`, {
-      groupFolder: group.folder,
-      groupJid: group.jid,
-      messageCount: messages.length,
-      sinceTimestamp: lastTimestamp,
-      messages: messages.map((m) => ({
-        id: m.id,
-        sender: m.sender_name || m.sender,
-        contentPreview: m.content.substring(0, 100),
-        timestamp: m.timestamp,
-      })),
-    });
+    const lastMessage = messages[messages.length - 1]!;
+    if (isClearSessionCommand(lastMessage)) {
+      log.info(TAG, `Handling direct /clear command for group ${group.folder}`, {
+        groupFolder: group.folder,
+        groupJid: group.jid,
+        messageId: lastMessage.id,
+        timestamp: lastMessage.timestamp,
+        isActiveSession: groupQueue.isActive(group.folder),
+      });
+
+      void groupQueue.clearSession(group.folder)
+        .then(() => channelManager.send(group.jid, buildClearSessionSystemReply()))
+        .catch((err) => {
+          log.error(TAG, `Failed to handle /clear for group ${group.folder}`, err);
+          return channelManager.send(
+            group.jid,
+            "Session 清理失败，请稍后重试。",
+          );
+        });
+
+      setRouterState(db, cursorKey, lastMessage.timestamp);
+      log.debug(TAG, `Cursor updated after /clear for group ${group.folder}`, {
+        newTimestamp: lastMessage.timestamp,
+      });
+      continue;
+    }
+
+    // log.info(TAG, `Found ${messages.length} new messages for group ${group.folder} (${group.jid})`, {
+    //   groupFolder: group.folder,
+    //   groupJid: group.jid,
+    //   messageCount: messages.length,
+    //   sinceTimestamp: lastTimestamp,
+    //   messages: messages.map((m) => ({
+    //     id: m.id,
+    //     sender: m.sender_name || m.sender,
+    //     contentPreview: m.content.substring(0, 100),
+    //     timestamp: m.timestamp,
+    //   })),
+    // });
 
     // Find trigger messages
     const triggerMessages = messages.filter((m) =>
@@ -146,3 +181,9 @@ function processMessages(
     });
   }
 }
+
+export const __test__ = {
+  buildClearSessionSystemReply,
+  isClearSessionCommand,
+  processMessages,
+};

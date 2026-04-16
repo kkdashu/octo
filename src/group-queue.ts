@@ -141,7 +141,9 @@ export function buildGroupExternalMcpServers(
 
 export class GroupQueue {
   private locks: Map<string, Promise<void>> = new Map();
-  private activeSessions: Map<string, AgentSession> = new Map();
+  private activeSessions: Map<string, { session: AgentSession; generation: number }> =
+    new Map();
+  private sessionGenerations: Map<string, number> = new Map();
   private activeTasks = 0;
   private concurrencyLimit: number;
   private db: Database;
@@ -161,15 +163,25 @@ export class GroupQueue {
     log.info(TAG, `GroupQueue initialized`, { concurrencyLimit });
   }
 
+  private getSessionGeneration(groupFolder: string): number {
+    return this.sessionGenerations.get(groupFolder) ?? 0;
+  }
+
+  private bumpSessionGeneration(groupFolder: string): number {
+    const nextGeneration = this.getSessionGeneration(groupFolder) + 1;
+    this.sessionGenerations.set(groupFolder, nextGeneration);
+    return nextGeneration;
+  }
+
   /** Push a message to an active session, returns false if no active session */
   pushMessage(groupFolder: string, text: string): boolean {
-    const session = this.activeSessions.get(groupFolder);
-    if (session) {
+    const activeSession = this.activeSessions.get(groupFolder);
+    if (activeSession) {
       log.info(TAG, `Pushing follow-up message to active session: ${groupFolder}`, {
         textLength: text.length,
         textPreview: text.substring(0, 200),
       });
-      session.push(text);
+      activeSession.session.push(text);
       return true;
     }
     log.debug(TAG, `No active session for ${groupFolder}, cannot push`);
@@ -253,6 +265,7 @@ export class GroupQueue {
         workingDirectory,
         persistedSessionId,
       );
+      const sessionGeneration = this.getSessionGeneration(groupFolder);
 
       if (persistedSessionId && !resumeSessionId) {
         deleteSessionId(this.db, groupFolder);
@@ -261,6 +274,14 @@ export class GroupQueue {
           workingDirectory,
         });
       }
+
+      log.info(TAG, `Resolved session state for ${groupFolder}`, {
+        persistedSessionId,
+        resumeSessionId: resumeSessionId ?? null,
+        workingDirectory,
+        sessionGeneration,
+        willResume: !!resumeSessionId,
+      });
 
       const memories = listGroupMemories(this.db, groupFolder);
       const memoryBlock = buildGroupMemoryPromptBlock(memories);
@@ -288,13 +309,50 @@ export class GroupQueue {
         externalMcpServers: buildGroupExternalMcpServers(groupFolder),
       });
 
-      this.activeSessions.set(groupFolder, session);
-      log.info(TAG, `Agent started and session registered for ${groupFolder}`);
+      if (sessionGeneration !== this.getSessionGeneration(groupFolder)) {
+        session.close();
+        this.activeTasks--;
+        log.warn(TAG, `Discarding stale session startup for ${groupFolder} after generation changed`, {
+          groupFolder,
+          sessionGeneration,
+          currentGeneration: this.getSessionGeneration(groupFolder),
+        });
+        return;
+      }
+
+      this.activeSessions.set(groupFolder, {
+        session,
+        generation: sessionGeneration,
+      });
+      log.info(TAG, `Agent started and session registered for ${groupFolder}`, {
+        sessionGeneration,
+        resumeSessionId: resumeSessionId ?? null,
+      });
 
       // Process event stream asynchronously
       (async () => {
         try {
           for await (const event of events) {
+            const isCurrentGeneration =
+              sessionGeneration === this.getSessionGeneration(groupFolder);
+
+            if (!isCurrentGeneration) {
+              if (event.type === "result") {
+                log.warn(TAG, `Ignoring stale result for ${groupFolder}`, {
+                  staleGeneration: sessionGeneration,
+                  currentGeneration: this.getSessionGeneration(groupFolder),
+                  sessionId: event.sessionId,
+                });
+              } else if (event.type === "text") {
+                log.warn(TAG, `Ignoring stale text event for ${groupFolder}`, {
+                  staleGeneration: sessionGeneration,
+                  currentGeneration: this.getSessionGeneration(groupFolder),
+                  textPreview: event.text.substring(0, 120),
+                });
+              }
+              continue;
+            }
+
             if (event.type === "text") {
               log.info(TAG, `Sending agent reply to chat ${group.jid}`, {
                 groupFolder,
@@ -302,14 +360,25 @@ export class GroupQueue {
               });
               await this.channelManager.send(group.jid, event.text);
             } else if (event.type === "result") {
+              log.info(TAG, `Received agent result for ${groupFolder}`, {
+                sessionGeneration,
+                sessionId: event.sessionId ?? null,
+              });
               if (event.sessionId) {
+                const previousPersistedSessionId = getSessionId(this.db, groupFolder);
                 saveSessionId(this.db, groupFolder, event.sessionId);
-                log.info(TAG, `Session ID saved for group ${groupFolder}: ${event.sessionId}`);
+                log.info(TAG, `Session ID saved for group ${groupFolder}`, {
+                  previousPersistedSessionId,
+                  sessionId: event.sessionId,
+                  sessionGeneration,
+                });
               }
               // Close the session after each turn to release the concurrency slot.
               // The session ID is persisted above so it can be resumed on the next message.
               session.close();
-              log.info(TAG, `Session closed after turn completion for ${groupFolder}`);
+              log.info(TAG, `Session closed after turn completion for ${groupFolder}`, {
+                sessionGeneration,
+              });
             } else if (event.type === "error") {
               log.error(TAG, `Agent error for group ${groupFolder}`, event.error);
             }
@@ -317,7 +386,10 @@ export class GroupQueue {
         } catch (err) {
           log.error(TAG, `Event stream error for group ${groupFolder}`, err);
         } finally {
-          this.activeSessions.delete(groupFolder);
+          const activeSession = this.activeSessions.get(groupFolder);
+          if (activeSession?.generation === sessionGeneration) {
+            this.activeSessions.delete(groupFolder);
+          }
           this.activeTasks--;
           log.debug(TAG, `Session ended for ${groupFolder}, active: ${this.activeTasks}/${this.concurrencyLimit}`);
         }
@@ -330,16 +402,23 @@ export class GroupQueue {
 
   /** Remove an active session (e.g., when agent finishes) */
   removeSession(groupFolder: string) {
-    const session = this.activeSessions.get(groupFolder);
-    if (session) {
+    const activeSession = this.activeSessions.get(groupFolder);
+    if (activeSession) {
       log.info(TAG, `Removing active session for ${groupFolder}`);
-      session.close();
+      activeSession.session.close();
       this.activeSessions.delete(groupFolder);
     }
   }
 
-  /** Clear session for a group (called by clear_context tool from main group) */
-  async clearSession(groupFolder: string): Promise<{ closedActiveSession: boolean; sessionId: string }> {
+  /** Clear session for a group */
+  async clearSession(
+    groupFolder: string,
+  ): Promise<{
+    closedActiveSession: boolean;
+    previousSessionId: string | null;
+    sessionId: string;
+    generation: number;
+  }> {
     log.info(TAG, `Clearing session for group: ${groupFolder}`);
 
     const group = getGroupByFolder(this.db, groupFolder);
@@ -347,22 +426,38 @@ export class GroupQueue {
       throw new Error(`Group not found: ${groupFolder}`);
     }
 
+    const previousSessionId = getSessionId(this.db, groupFolder);
+    const generationBefore = this.getSessionGeneration(groupFolder);
+    const generation = this.bumpSessionGeneration(groupFolder);
     const closedActiveSession = this.activeSessions.has(groupFolder);
     const activeSession = this.activeSessions.get(groupFolder);
+    const activeSessionGeneration = activeSession?.generation ?? null;
     if (activeSession) {
-      log.info(TAG, `Closing active session for ${groupFolder} before slash clear`);
-      activeSession.close();
+      log.info(TAG, `Closing active session for ${groupFolder} before /clear session command`);
+      activeSession.session.close();
       this.activeSessions.delete(groupFolder);
     }
 
     const requestedProfileKey = group.agent_provider || "claude";
     const profile = resolveAgentProfile(requestedProfileKey);
     const workingDirectory = resolve("groups", groupFolder);
-    const persistedSessionId = getSessionId(this.db, groupFolder);
+    const persistedSessionId = previousSessionId;
     const resumeSessionId = await resolveClaudeResumeSessionId(
       workingDirectory,
       persistedSessionId,
     );
+
+    log.info(TAG, `Resolved session state before clear for ${groupFolder}`, {
+      previousSessionId,
+      persistedSessionId,
+      resumeSessionId: resumeSessionId ?? null,
+      closedActiveSession,
+      activeSessionGeneration,
+      generationBefore,
+      generationAfter: generation,
+      workingDirectory,
+      profileKey: profile.profileKey,
+    });
 
     if (persistedSessionId && !resumeSessionId) {
       deleteSessionId(this.db, groupFolder);
@@ -383,12 +478,21 @@ export class GroupQueue {
     });
 
     saveSessionId(this.db, groupFolder, sessionId);
-    log.info(TAG, `Context cleared via Claude slash command for ${groupFolder}`, {
+    log.info(TAG, `Session cleared via Claude /clear command for ${groupFolder}`, {
+      previousSessionId,
       sessionId,
+      resumeSessionId: resumeSessionId ?? null,
       closedActiveSession,
+      generationBefore,
+      generationAfter: generation,
     });
 
-    return { closedActiveSession, sessionId };
+    return {
+      closedActiveSession,
+      previousSessionId,
+      sessionId,
+      generation,
+    };
   }
 }
 

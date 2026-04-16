@@ -90,6 +90,85 @@ function buildExternalMcpAllowedTools(
   );
 }
 
+type ClearContextStreamMessage = {
+  type: string;
+  subtype?: string;
+  session_id?: string | null;
+};
+
+type ClearContextStreamInspection = {
+  initSessionId?: string;
+  resultSessionId?: string;
+  messageCount: number;
+};
+
+function inspectClearContextMessages(
+  messages: Iterable<ClearContextStreamMessage>,
+): ClearContextStreamInspection {
+  let initSessionId: string | undefined;
+  let resultSessionId: string | undefined;
+  let messageCount = 0;
+
+  for (const message of messages) {
+    messageCount++;
+
+    if (
+      message.type === "system" &&
+      message.subtype === "init" &&
+      typeof message.session_id === "string" &&
+      message.session_id.length > 0
+    ) {
+      initSessionId = message.session_id;
+    }
+
+    if (
+      message.type === "result" &&
+      typeof message.session_id === "string" &&
+      message.session_id.length > 0
+    ) {
+      resultSessionId = message.session_id;
+    }
+  }
+
+  return {
+    initSessionId,
+    resultSessionId,
+    messageCount,
+  };
+}
+
+function resolveClearedSessionId(
+  messages: Iterable<ClearContextStreamMessage>,
+  previousSessionId?: string,
+): string {
+  const { initSessionId, resultSessionId } = inspectClearContextMessages(messages);
+
+  if (previousSessionId) {
+    if (resultSessionId && resultSessionId !== previousSessionId) {
+      return resultSessionId;
+    }
+
+    const observedSessionId = resultSessionId ?? initSessionId;
+    if (observedSessionId === previousSessionId) {
+      throw new Error(
+        `Claude /clear reused previous session id ${previousSessionId}`,
+      );
+    }
+
+    throw new Error("Claude /clear did not return a fresh result.session_id");
+  }
+
+  if (resultSessionId) {
+    return resultSessionId;
+  }
+
+  if (initSessionId) {
+    return initSessionId;
+  }
+
+  throw new Error("Claude /clear did not return any session id");
+}
+
 function toPosixPath(filePath: string): string {
   return filePath.replace(/\\/g, "/");
 }
@@ -318,6 +397,17 @@ export class ClaudeProvider implements AgentProvider {
     const env = buildClaudeSdkEnv(config.profile, proxyRoute);
 
     try {
+      const clearMessages: ClearContextStreamMessage[] = [];
+
+      log.info(TAG, `Starting Claude /clear for ${config.groupFolder}`, {
+        previousSessionId: config.resumeSessionId ?? null,
+        hasResumeSession: !!config.resumeSessionId,
+        workingDirectory: config.workingDirectory,
+        profileKey: config.profile.profileKey,
+        apiFormat: config.profile.apiFormat,
+        model: config.profile.model,
+      });
+
       for await (const message of query({
         prompt: "/clear",
         options: {
@@ -331,25 +421,38 @@ export class ClaudeProvider implements AgentProvider {
           ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
         },
       })) {
-        if (message.type === "system" && (message as any).subtype === "init") {
-          const sessionId = (message as any).session_id;
-          if (sessionId) {
-            return { sessionId };
-          }
-        }
-
-        if (message.type === "result") {
-          const sessionId = (message as any).session_id;
-          if (sessionId) {
-            return { sessionId };
-          }
-        }
+        clearMessages.push({
+          type: message.type,
+          subtype: (message as any).subtype,
+          session_id: (message as any).session_id,
+        });
       }
+
+      const inspection = inspectClearContextMessages(clearMessages);
+      log.info(TAG, `Claude /clear stream completed for ${config.groupFolder}`, {
+        previousSessionId: config.resumeSessionId ?? null,
+        initSessionId: inspection.initSessionId ?? null,
+        resultSessionId: inspection.resultSessionId ?? null,
+        messageCount: inspection.messageCount,
+      });
+
+      const sessionId = resolveClearedSessionId(clearMessages, config.resumeSessionId);
+      log.info(TAG, `Claude /clear resolved fresh session for ${config.groupFolder}`, {
+        previousSessionId: config.resumeSessionId ?? null,
+        sessionId,
+        initSessionId: inspection.initSessionId ?? null,
+        resultSessionId: inspection.resultSessionId ?? null,
+      });
+
+      return {
+        sessionId,
+      };
+    } catch (error) {
+      log.error(TAG, `Claude /clear failed for ${config.groupFolder}`, error);
+      throw error;
     } finally {
       proxyRoute?.release();
     }
-
-    throw new Error(`Failed to clear context for group ${config.groupFolder}: no new session id returned`);
   }
 
   async startSession(config: SessionConfig): Promise<{
@@ -515,5 +618,6 @@ export const __test__ = {
   buildExternalMcpAllowedTools,
   buildSessionMcpServers,
   makeUserMessage,
+  resolveClearedSessionId,
   resolveAgentReadablePath,
 };

@@ -74,7 +74,7 @@ describe("AgentEvent stream contract", () => {
   });
 });
 
-describe("Provider clear context contract", () => {
+describe("Provider clear session contract", () => {
   test("mock provider clearContext returns a fresh session id", async () => {
     const mockProvider: AgentProvider = {
       name: "mock",
@@ -103,6 +103,49 @@ describe("Provider clear context contract", () => {
     });
 
     expect(result).toEqual({ sessionId: "fresh-session-123" });
+  });
+});
+
+describe("Claude provider clear session id resolution", () => {
+  test("uses result.session_id when resumed clear starts with the old init session id", () => {
+    expect(
+      claudeProviderTestHelpers.resolveClearedSessionId(
+        [
+          { type: "system", subtype: "init", session_id: "session-old" },
+          { type: "result", session_id: "session-new" },
+        ],
+        "session-old",
+      ),
+    ).toBe("session-new");
+  });
+
+  test("rejects resumed clear when only init.session_id is returned", () => {
+    expect(() =>
+      claudeProviderTestHelpers.resolveClearedSessionId(
+        [{ type: "system", subtype: "init", session_id: "session-old" }],
+        "session-old",
+      ),
+    ).toThrow("Claude /clear reused previous session id session-old");
+  });
+
+  test("rejects resumed clear when result.session_id is unchanged", () => {
+    expect(() =>
+      claudeProviderTestHelpers.resolveClearedSessionId(
+        [
+          { type: "system", subtype: "init", session_id: "session-old" },
+          { type: "result", session_id: "session-old" },
+        ],
+        "session-old",
+      ),
+    ).toThrow("Claude /clear reused previous session id session-old");
+  });
+
+  test("falls back to init.session_id only when clear is not resuming an old session", () => {
+    expect(
+      claudeProviderTestHelpers.resolveClearedSessionId([
+        { type: "system", subtype: "init", session_id: "session-fresh" },
+      ]),
+    ).toBe("session-fresh");
   });
 });
 
