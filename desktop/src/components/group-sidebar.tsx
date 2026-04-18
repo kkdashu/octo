@@ -19,6 +19,7 @@ function getConnectionLabel(state: GroupConnectionState): string {
 
 interface GroupSidebarProps {
   groups: GroupRuntimeSummary[];
+  activeView: "chat" | "admin";
   activeGroupFolder: string | null;
   connectionState: GroupConnectionState;
   sidecarBaseUrl: string;
@@ -26,6 +27,7 @@ interface GroupSidebarProps {
   isCreateFormOpen: boolean;
   createGroupName: string;
   onSelect(groupFolder: string): void;
+  onOpenAdmin(): void;
   onCreateGroup(): void;
   onCreateGroupNameChange(value: string): void;
   onToggleCreateForm(): void;
@@ -98,7 +100,9 @@ export function GroupSidebar(props: GroupSidebarProps) {
           <button
             key={group.folder}
             className={`group-card ${
-              group.folder === props.activeGroupFolder ? "group-card-active" : ""
+              props.activeView === "chat" && group.folder === props.activeGroupFolder
+                ? "group-card-active"
+                : ""
             }`}
             type="button"
             onClick={() => props.onSelect(group.folder)}
@@ -128,6 +132,17 @@ export function GroupSidebar(props: GroupSidebarProps) {
           </button>
         ))}
       </div>
+      <footer className="sidebar-footer">
+        <button
+          type="button"
+          className={`sidebar-nav-button ${
+            props.activeView === "admin" ? "sidebar-nav-button-active" : ""
+          }`}
+          onClick={props.onOpenAdmin}
+        >
+          Admin
+        </button>
+      </footer>
     </aside>
   );
 }

@@ -2,12 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAdminApiRouter } from "../src/admin/api";
-import { ADMIN_HOSTNAME, startAdminServer } from "../src/admin/server";
+import { createDesktopAdminApiRouter } from "../src/desktop/admin-api";
 import { getGroupByFolder, initDatabase, registerGroup, upsertGroupMemory } from "../src/db";
 
 function createWorkspace() {
-  const dir = join(tmpdir(), `octo-admin-api-${crypto.randomUUID()}`);
+  const dir = join(tmpdir(), `octo-desktop-admin-api-${crypto.randomUUID()}`);
   mkdirSync(join(dir, "groups", "test-group"), { recursive: true });
   mkdirSync(join(dir, "store"), { recursive: true });
 
@@ -73,7 +72,7 @@ function withParams<T extends Request>(request: T, params: Record<string, string
 }
 
 const cleanupDirs: string[] = [];
-let previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
 afterEach(() => {
   process.env.AGENT_PROFILES_PATH = previousProfilesPath;
@@ -85,14 +84,14 @@ afterEach(() => {
   }
 });
 
-describe("admin api router", () => {
+describe("desktop admin api router", () => {
   test("lists groups with available profiles", async () => {
     const { dir, db, configPath } = createWorkspace();
     cleanupDirs.push(dir);
     process.env.AGENT_PROFILES_PATH = configPath;
 
-    const router = createAdminApiRouter(db, { rootDir: dir });
-    const response = router.listGroups(new Request("http://localhost/api/admin/groups"));
+    const router = createDesktopAdminApiRouter(db, { rootDir: dir });
+    const response = router.listGroups(new Request("http://localhost/api/desktop/admin/groups"));
     const payload = await response.json() as {
       groups: Array<{ folder: string }>;
       availableProfiles: Array<{ profileKey: string }>;
@@ -112,9 +111,9 @@ describe("admin api router", () => {
     cleanupDirs.push(dir);
     process.env.AGENT_PROFILES_PATH = configPath;
 
-    const router = createAdminApiRouter(db, { rootDir: dir });
+    const router = createDesktopAdminApiRouter(db, { rootDir: dir });
     const successResponse = await router.patchGroup(withParams(
-      new Request("http://localhost/api/admin/groups/test-group", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -135,7 +134,7 @@ describe("admin api router", () => {
     expect(updated?.profile_key).toBe("minimax");
 
     const invalidResponse = await router.patchGroup(withParams(
-      new Request("http://localhost/api/admin/groups/test-group", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -159,10 +158,10 @@ describe("admin api router", () => {
     cleanupDirs.push(dir);
     process.env.AGENT_PROFILES_PATH = configPath;
 
-    const router = createAdminApiRouter(db, { rootDir: dir });
+    const router = createDesktopAdminApiRouter(db, { rootDir: dir });
 
     const detailResponse = router.getGroup(withParams(
-      new Request("http://localhost/api/admin/groups/test-group"),
+      new Request("http://localhost/api/desktop/admin/groups/test-group"),
       { folder: "test-group" },
     ));
     expect(detailResponse.status).toBe(200);
@@ -178,7 +177,7 @@ describe("admin api router", () => {
     });
 
     const createMemoryResponse = await router.putMemory(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/memory", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group/memory", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -201,7 +200,7 @@ describe("admin api router", () => {
     });
 
     const invalidBuiltinResponse = await router.putMemory(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/memory", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group/memory", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -218,7 +217,7 @@ describe("admin api router", () => {
     });
 
     const deleteMemoryResponse = router.deleteMemory(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/memory?key=topic_context", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group/memory?key=topic_context", {
         method: "DELETE",
       }),
       { folder: "test-group" },
@@ -231,7 +230,7 @@ describe("admin api router", () => {
     });
 
     const missingMemoryResponse = router.deleteMemory(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/memory?key=missing_key", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group/memory?key=missing_key", {
         method: "DELETE",
       }),
       { folder: "test-group" },
@@ -247,10 +246,10 @@ describe("admin api router", () => {
     cleanupDirs.push(dir);
     process.env.AGENT_PROFILES_PATH = configPath;
 
-    const router = createAdminApiRouter(db, { rootDir: dir });
+    const router = createDesktopAdminApiRouter(db, { rootDir: dir });
 
     const readResponse = router.getFile(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/file?path=AGENTS.md"),
+      new Request("http://localhost/api/desktop/admin/groups/test-group/file?path=AGENTS.md"),
       { folder: "test-group" },
     ));
     expect(readResponse.status).toBe(200);
@@ -260,7 +259,7 @@ describe("admin api router", () => {
     });
 
     const writeResponse = await router.putFile(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/file", {
+      new Request("http://localhost/api/desktop/admin/groups/test-group/file", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -275,50 +274,5 @@ describe("admin api router", () => {
       path: "AGENTS.md",
       content: "updated\n",
     });
-  });
-
-  test("starts the admin server on localhost by default", () => {
-    const originalServe = Bun.serve;
-    let capturedHostname: string | undefined;
-    let capturedPort: number | undefined;
-
-    const bunObject = Bun as unknown as {
-      serve: typeof Bun.serve;
-    };
-
-    bunObject.serve = ((options: Parameters<typeof Bun.serve>[0]) => {
-      capturedHostname = options.hostname;
-      capturedPort = options.port;
-      return {
-        url: new URL(`http://${options.hostname}:${options.port}`),
-        stop() {
-          // no-op
-        },
-      } as ReturnType<typeof Bun.serve>;
-    }) as typeof Bun.serve;
-
-    try {
-      const server = startAdminServer({
-        port: 3210,
-        api: {
-          listGroups: () => Response.json({ groups: [], availableProfiles: [] }),
-          getGroup: () => Response.json({}),
-          patchGroup: async () => Response.json({}),
-          putMemory: async () => Response.json({}),
-          deleteMemory: () => Response.json({}),
-          listFiles: () => Response.json({ path: ".", entries: [] }),
-          getFile: () => Response.json({ path: "x", content: "", size: 0 }),
-          putFile: async () => Response.json({}),
-          postFile: async () => Response.json({}),
-          postFolder: async () => Response.json({}),
-        },
-      });
-
-      expect(capturedHostname).toBe(ADMIN_HOSTNAME);
-      expect(capturedPort).toBe(3210);
-      expect(server.url.hostname).toBe(ADMIN_HOSTNAME);
-    } finally {
-      bunObject.serve = originalServe;
-    }
   });
 });

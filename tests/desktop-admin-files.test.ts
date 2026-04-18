@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createGroupDirectory,
-  GroupFileError,
+  DesktopAdminFileError,
   listGroupDirectory,
   readGroupTextFile,
   resolveGroupPath,
   writeGroupTextFile,
-} from "../src/admin/group-files";
+} from "../src/desktop/admin-files";
 
 function createWorkspace() {
-  const dir = join(tmpdir(), `octo-admin-files-${crypto.randomUUID()}`);
+  const dir = join(tmpdir(), `octo-desktop-admin-files-${crypto.randomUUID()}`);
   mkdirSync(join(dir, "groups", "test-group"), { recursive: true });
   return dir;
 }
@@ -28,7 +28,7 @@ afterEach(() => {
   }
 });
 
-describe("admin group file helpers", () => {
+describe("desktop admin group file helpers", () => {
   test("lists and reads files inside the group root", () => {
     const rootDir = createWorkspace();
     cleanupDirs.push(rootDir);
@@ -48,7 +48,7 @@ describe("admin group file helpers", () => {
     const rootDir = createWorkspace();
     cleanupDirs.push(rootDir);
 
-    expect(() => resolveGroupPath("test-group", "../outside.txt", rootDir)).toThrow(GroupFileError);
+    expect(() => resolveGroupPath("test-group", "../outside.txt", rootDir)).toThrow(DesktopAdminFileError);
   });
 
   test("rejects reading a directory as a file", () => {
@@ -56,7 +56,7 @@ describe("admin group file helpers", () => {
     cleanupDirs.push(rootDir);
     mkdirSync(join(rootDir, "groups", "test-group", "nested"), { recursive: true });
 
-    expect(() => readGroupTextFile("test-group", "nested", rootDir)).toThrow(GroupFileError);
+    expect(() => readGroupTextFile("test-group", "nested", rootDir)).toThrow(DesktopAdminFileError);
   });
 
   test("writes files only inside the group root", () => {
@@ -73,7 +73,7 @@ describe("admin group file helpers", () => {
     expect(() => writeGroupTextFile("test-group", "../hack.txt", "bad", {
       createParents: true,
       rootDir,
-    })).toThrow(GroupFileError);
+    })).toThrow(DesktopAdminFileError);
   });
 
   test("creates directories and rejects non-utf8 files", () => {
@@ -88,6 +88,6 @@ describe("admin group file helpers", () => {
       Buffer.from([0xff, 0xfe, 0xfd]),
     );
 
-    expect(() => readGroupTextFile("test-group", "binary.bin", rootDir)).toThrow(GroupFileError);
+    expect(() => readGroupTextFile("test-group", "binary.bin", rootDir)).toThrow(DesktopAdminFileError);
   });
 });

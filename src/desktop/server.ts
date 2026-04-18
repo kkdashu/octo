@@ -1,5 +1,6 @@
 import { log } from "../logger";
 import type { DesktopApiRouter } from "./api";
+import type { DesktopAdminApiRouter } from "./admin-api";
 
 const TAG = "desktop-server";
 export const DESKTOP_HOSTNAME = "127.0.0.1";
@@ -9,7 +10,7 @@ function createCorsHeaders(req: Request): Headers {
   const headers = new Headers();
   const origin = req.headers.get("origin");
   headers.set("access-control-allow-origin", origin?.trim() || "*");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
+  headers.set("access-control-allow-methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
   headers.set("access-control-allow-headers", "Content-Type");
   headers.set("access-control-max-age", "600");
   headers.set("vary", "Origin");
@@ -39,6 +40,7 @@ function preflight(req: Request): Response {
 
 export function startDesktopServer(options: {
   api: DesktopApiRouter;
+  adminApi: DesktopAdminApiRouter;
   port?: number;
   hostname?: string;
 }) {
@@ -76,6 +78,34 @@ export function startDesktopServer(options: {
       },
       "/api/desktop/groups/:folder/events": {
         GET: async (req) => withCors(req, await options.api.getEvents(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups": {
+        GET: (req) => withCors(req, options.adminApi.listGroups(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups/:folder": {
+        GET: (req) => withCors(req, options.adminApi.getGroup(req)),
+        PATCH: async (req) => withCors(req, await options.adminApi.patchGroup(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups/:folder/memory": {
+        PUT: async (req) => withCors(req, await options.adminApi.putMemory(req)),
+        DELETE: (req) => withCors(req, options.adminApi.deleteMemory(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups/:folder/files": {
+        GET: (req) => withCors(req, options.adminApi.listFiles(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups/:folder/file": {
+        GET: (req) => withCors(req, options.adminApi.getFile(req)),
+        PUT: async (req) => withCors(req, await options.adminApi.putFile(req)),
+        POST: async (req) => withCors(req, await options.adminApi.postFile(req)),
+        OPTIONS: (req) => preflight(req),
+      },
+      "/api/desktop/admin/groups/:folder/folder": {
+        POST: async (req) => withCors(req, await options.adminApi.postFolder(req)),
         OPTIONS: (req) => preflight(req),
       },
     },

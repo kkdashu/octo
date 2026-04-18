@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChannelManager } from "../channels/manager";
 import { createCliMessageSender, registerOutboundFeishuChannel } from "../cli";
+import { createDesktopAdminApiRouter, type DesktopAdminApiRouter } from "./admin-api";
 import { createDesktopApiRouter, type DesktopApiRouter } from "./api";
 import { startDesktopServer } from "./server";
 import { initDatabase } from "../db";
@@ -26,6 +27,7 @@ export interface DesktopSidecarHandle {
   channelManager: ChannelManager;
   manager: GroupRuntimeManager;
   api: DesktopApiRouter;
+  adminApi: DesktopAdminApiRouter;
   server: ReturnType<typeof Bun.serve>;
   stop(): Promise<void>;
 }
@@ -129,8 +131,10 @@ export async function startDesktopSidecar(
       };
     },
   });
+  const adminApi = createDesktopAdminApiRouter(db, { rootDir });
   const server = startDesktopServer({
     api,
+    adminApi,
     hostname: options.hostname,
     port: options.port,
   });
@@ -143,6 +147,7 @@ export async function startDesktopSidecar(
     channelManager,
     manager,
     api,
+    adminApi,
     server,
     async stop() {
       if (stopped) {

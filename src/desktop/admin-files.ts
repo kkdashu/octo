@@ -8,10 +8,10 @@ import {
 } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type {
-  AdminDirectoryEntryDto,
-  AdminDirectoryListingDto,
-  AdminFileContentDto,
-} from "./types";
+  DesktopAdminDirectoryEntryDto,
+  DesktopAdminDirectoryListingDto,
+  DesktopAdminFileContentDto,
+} from "./admin-types";
 
 export const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 
@@ -24,13 +24,13 @@ type GroupFileErrorCode =
   | "not_text"
   | "file_too_large";
 
-export class GroupFileError extends Error {
+export class DesktopAdminFileError extends Error {
   code: GroupFileErrorCode;
   status: number;
 
   constructor(code: GroupFileErrorCode, message: string, status: number) {
     super(message);
-    this.name = "GroupFileError";
+    this.name = "DesktopAdminFileError";
     this.code = code;
     this.status = status;
   }
@@ -63,7 +63,7 @@ export function resolveGroupPath(
   const rel = relative(groupRoot, absolutePath);
 
   if (rel === ".." || rel.startsWith(`..${"/"}`) || rel.startsWith(`..${"\\"}`)) {
-    throw new GroupFileError("invalid_path", "Path escapes group root", 400);
+    throw new DesktopAdminFileError("invalid_path", "Path escapes group root", 400);
   }
 
   return absolutePath;
@@ -77,22 +77,22 @@ export function listGroupDirectory(
   groupFolder: string,
   targetPath = ".",
   rootDir = process.cwd(),
-): AdminDirectoryListingDto {
+): DesktopAdminDirectoryListingDto {
   const groupRoot = getGroupRoot(groupFolder, rootDir);
   const absolutePath = resolveGroupPath(groupFolder, targetPath, rootDir);
 
   if (!existsSync(absolutePath)) {
-    throw new GroupFileError("not_found", `Path not found: ${targetPath}`, 404);
+    throw new DesktopAdminFileError("not_found", `Path not found: ${targetPath}`, 404);
   }
 
   const stats = statSync(absolutePath);
   if (!stats.isDirectory()) {
-    throw new GroupFileError("not_directory", `Path is not a directory: ${targetPath}`, 400);
+    throw new DesktopAdminFileError("not_directory", `Path is not a directory: ${targetPath}`, 400);
   }
 
   const displayPath = toDisplayPath(groupRoot, absolutePath);
   const entries = readdirSync(absolutePath, { withFileTypes: true })
-    .map((entry): AdminDirectoryEntryDto => {
+    .map((entry): DesktopAdminDirectoryEntryDto => {
       const childAbsolutePath = resolve(absolutePath, entry.name);
       const childDisplayPath = joinRelativePath(displayPath, entry.name);
       if (entry.isDirectory()) {
@@ -128,23 +128,23 @@ export function readGroupTextFile(
   groupFolder: string,
   targetPath: string,
   rootDir = process.cwd(),
-): AdminFileContentDto {
+): DesktopAdminFileContentDto {
   const groupRoot = getGroupRoot(groupFolder, rootDir);
   const absolutePath = resolveGroupPath(groupFolder, targetPath, rootDir);
 
   if (!existsSync(absolutePath)) {
-    throw new GroupFileError("not_found", `File not found: ${targetPath}`, 404);
+    throw new DesktopAdminFileError("not_found", `File not found: ${targetPath}`, 404);
   }
 
   const stats = statSync(absolutePath);
   if (!stats.isFile()) {
-    throw new GroupFileError("not_file", `Path is not a file: ${targetPath}`, 400);
+    throw new DesktopAdminFileError("not_file", `Path is not a file: ${targetPath}`, 400);
   }
 
   if (stats.size > MAX_TEXT_FILE_BYTES) {
-    throw new GroupFileError(
+    throw new DesktopAdminFileError(
       "file_too_large",
-      `File is too large to open in admin UI: ${targetPath}`,
+      `File is too large to open in desktop admin: ${targetPath}`,
       413,
     );
   }
@@ -154,7 +154,7 @@ export function readGroupTextFile(
   try {
     content = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
   } catch {
-    throw new GroupFileError("not_text", `File is not valid UTF-8 text: ${targetPath}`, 415);
+    throw new DesktopAdminFileError("not_text", `File is not valid UTF-8 text: ${targetPath}`, 415);
   }
 
   return {
@@ -173,17 +173,17 @@ export function writeGroupTextFile(
     overwrite?: boolean;
     rootDir?: string;
   },
-): AdminFileContentDto {
+): DesktopAdminFileContentDto {
   const rootDir = options?.rootDir ?? process.cwd();
   const absolutePath = resolveGroupPath(groupFolder, targetPath, rootDir);
   const exists = existsSync(absolutePath);
 
   if (exists && !options?.overwrite) {
-    throw new GroupFileError("already_exists", `File already exists: ${targetPath}`, 409);
+    throw new DesktopAdminFileError("already_exists", `File already exists: ${targetPath}`, 409);
   }
 
   if (exists && !statSync(absolutePath).isFile()) {
-    throw new GroupFileError("not_file", `Path is not a file: ${targetPath}`, 400);
+    throw new DesktopAdminFileError("not_file", `Path is not a file: ${targetPath}`, 400);
   }
 
   if (!exists && options?.createParents) {
@@ -191,7 +191,7 @@ export function writeGroupTextFile(
   }
 
   if (!exists && !existsSync(dirname(absolutePath))) {
-    throw new GroupFileError("not_found", `Parent directory not found: ${targetPath}`, 404);
+    throw new DesktopAdminFileError("not_found", `Parent directory not found: ${targetPath}`, 404);
   }
 
   writeFileSync(absolutePath, content, "utf-8");
@@ -202,10 +202,10 @@ export function createGroupDirectory(
   groupFolder: string,
   targetPath: string,
   rootDir = process.cwd(),
-): AdminDirectoryListingDto {
+): DesktopAdminDirectoryListingDto {
   const absolutePath = resolveGroupPath(groupFolder, targetPath, rootDir);
   if (existsSync(absolutePath)) {
-    throw new GroupFileError("already_exists", `Path already exists: ${targetPath}`, 409);
+    throw new DesktopAdminFileError("already_exists", `Path already exists: ${targetPath}`, 409);
   }
 
   mkdirSync(absolutePath, { recursive: true });

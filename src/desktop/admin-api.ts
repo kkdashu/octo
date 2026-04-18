@@ -14,26 +14,26 @@ import {
 import { listAgentProfiles, loadAgentProfilesConfig } from "../runtime/profile-config";
 import {
   createGroupDirectory,
-  GroupFileError,
+  DesktopAdminFileError,
   listGroupDirectory,
   readGroupTextFile,
   writeGroupTextFile,
-} from "./group-files";
+} from "./admin-files";
 import type {
-  AdminDirectoryListingDto,
-  AdminFileContentDto,
-  AdminGroupDetailResponse,
-  AdminGroupDto,
-  AdminGroupListResponse,
-  AdminGroupMemoryDto,
-  AdminProfileOption,
-} from "./types";
+  DesktopAdminDirectoryListingDto,
+  DesktopAdminFileContentDto,
+  DesktopAdminGroupDetailResponse,
+  DesktopAdminGroupDto,
+  DesktopAdminGroupListResponse,
+  DesktopAdminGroupMemoryDto,
+  DesktopAdminProfileOption,
+} from "./admin-types";
 
 type RouteRequest = Request & {
   params?: Record<string, string>;
 };
 
-export interface AdminApiRouter {
+export interface DesktopAdminApiRouter {
   listGroups(req: Request): Response;
   getGroup(req: Request): Response;
   patchGroup(req: Request): Promise<Response>;
@@ -100,10 +100,11 @@ function getFolderParam(req: Request): string {
   if (!folder) {
     throw new Error("Missing route param: folder");
   }
+
   return folder;
 }
 
-function toAdminProfileOption(): AdminProfileOption[] {
+function toDesktopAdminProfileOption(): DesktopAdminProfileOption[] {
   return listAgentProfiles()
     .map((profile) => ({
       profileKey: profile.profileKey,
@@ -116,7 +117,7 @@ function toAdminProfileOption(): AdminProfileOption[] {
     .sort((a, b) => a.profileKey.localeCompare(b.profileKey));
 }
 
-function toAdminGroupDto(group: RegisteredGroup): AdminGroupDto {
+function toDesktopAdminGroupDto(group: RegisteredGroup): DesktopAdminGroupDto {
   return {
     jid: group.jid,
     name: group.name,
@@ -130,7 +131,7 @@ function toAdminGroupDto(group: RegisteredGroup): AdminGroupDto {
   };
 }
 
-function toAdminGroupMemoryDto(memory: GroupMemoryRow): AdminGroupMemoryDto {
+function toDesktopAdminGroupMemoryDto(memory: GroupMemoryRow): DesktopAdminGroupMemoryDto {
   return {
     key: memory.key,
     keyType: memory.key_type,
@@ -141,40 +142,41 @@ function toAdminGroupMemoryDto(memory: GroupMemoryRow): AdminGroupMemoryDto {
   };
 }
 
-function buildGroupListResponse(db: Database): AdminGroupListResponse {
+function buildGroupListResponse(db: Database): DesktopAdminGroupListResponse {
   const groups = listGroups(db)
-    .map(toAdminGroupDto)
+    .map(toDesktopAdminGroupDto)
     .sort((a, b) => {
       if (a.isMain !== b.isMain) {
         return a.isMain ? -1 : 1;
       }
+
       return a.name.localeCompare(b.name, "zh-Hans-CN");
     });
 
   return {
     groups,
-    availableProfiles: toAdminProfileOption(),
+    availableProfiles: toDesktopAdminProfileOption(),
   };
 }
 
 function buildGroupDetailResponse(
   db: Database,
   folder: string,
-): AdminGroupDetailResponse | null {
+): DesktopAdminGroupDetailResponse | null {
   const group = getGroupByFolder(db, folder);
   if (!group) {
     return null;
   }
 
   return {
-    group: toAdminGroupDto(group),
-    availableProfiles: toAdminProfileOption(),
-    memories: listGroupMemories(db, folder).map(toAdminGroupMemoryDto),
+    group: toDesktopAdminGroupDto(group),
+    availableProfiles: toDesktopAdminProfileOption(),
+    memories: listGroupMemories(db, folder).map(toDesktopAdminGroupMemoryDto),
   };
 }
 
 function handleKnownError(error: unknown): Response {
-  if (error instanceof GroupFileError) {
+  if (error instanceof DesktopAdminFileError) {
     return errorResponse(error.status, error.code, error.message);
   }
 
@@ -190,10 +192,10 @@ function handleKnownError(error: unknown): Response {
   return errorResponse(500, "internal_error");
 }
 
-export function createAdminApiRouter(
+export function createDesktopAdminApiRouter(
   db: Database,
   options?: { rootDir?: string },
-): AdminApiRouter {
+): DesktopAdminApiRouter {
   const rootDir = options?.rootDir ?? process.cwd();
 
   return {
@@ -208,6 +210,7 @@ export function createAdminApiRouter(
         if (!response) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -237,6 +240,7 @@ export function createAdminApiRouter(
         if (!response) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -269,6 +273,7 @@ export function createAdminApiRouter(
         if (!response) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -297,6 +302,7 @@ export function createAdminApiRouter(
         if (!response) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -309,8 +315,9 @@ export function createAdminApiRouter(
         if (!getGroupByFolder(db, folder)) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         const path = parsePathQuery(req);
-        const response: AdminDirectoryListingDto = listGroupDirectory(folder, path, rootDir);
+        const response: DesktopAdminDirectoryListingDto = listGroupDirectory(folder, path, rootDir);
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -323,8 +330,9 @@ export function createAdminApiRouter(
         if (!getGroupByFolder(db, folder)) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         const path = parsePathQuery(req);
-        const response: AdminFileContentDto = readGroupTextFile(folder, path, rootDir);
+        const response: DesktopAdminFileContentDto = readGroupTextFile(folder, path, rootDir);
         return json(response);
       } catch (error) {
         return handleKnownError(error);
@@ -337,6 +345,7 @@ export function createAdminApiRouter(
         if (!getGroupByFolder(db, folder)) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         const body = updateFileSchema.parse(await req.json());
         const response = writeGroupTextFile(folder, body.path, body.content, {
           overwrite: true,
@@ -354,6 +363,7 @@ export function createAdminApiRouter(
         if (!getGroupByFolder(db, folder)) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         const body = createFileSchema.parse(await req.json());
         const response = writeGroupTextFile(folder, body.path, body.content, {
           createParents: body.createParents ?? false,
@@ -372,6 +382,7 @@ export function createAdminApiRouter(
         if (!getGroupByFolder(db, folder)) {
           return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
         }
+
         const body = createFolderSchema.parse(await req.json());
         const response = createGroupDirectory(folder, body.path, rootDir);
         return json(response, 201);

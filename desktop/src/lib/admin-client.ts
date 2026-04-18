@@ -3,7 +3,7 @@ import type {
   AdminFileContentDto,
   AdminGroupDetailResponse,
   AdminGroupListResponse,
-} from "./types";
+} from "./admin-types";
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -22,20 +22,25 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
     } catch {
       // Ignore JSON parsing failures on error responses.
     }
+
     throw new Error(details || `Request failed with ${response.status}`);
   }
 
   return await response.json() as T;
 }
 
-export const adminApiClient = {
+export class DesktopAdminClient {
+  constructor(private readonly baseUrl: string) {}
+
   listGroups() {
-    return request<AdminGroupListResponse>("/api/admin/groups");
-  },
+    return request<AdminGroupListResponse>(this.resolve("/api/desktop/admin/groups"));
+  }
 
   getGroup(folder: string) {
-    return request<AdminGroupDetailResponse>(`/api/admin/groups/${encodeURIComponent(folder)}`);
-  },
+    return request<AdminGroupDetailResponse>(
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}`),
+    );
+  }
 
   updateGroup(
     folder: string,
@@ -47,13 +52,13 @@ export const adminApiClient = {
     },
   ) {
     return request<AdminGroupDetailResponse>(
-      `/api/admin/groups/${encodeURIComponent(folder)}`,
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}`),
       {
         method: "PATCH",
         body: JSON.stringify(payload),
       },
     );
-  },
+  }
 
   upsertMemory(
     folder: string,
@@ -64,65 +69,75 @@ export const adminApiClient = {
     },
   ) {
     return request<AdminGroupDetailResponse>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/memory`,
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}/memory`),
       {
         method: "PUT",
         body: JSON.stringify(payload),
       },
     );
-  },
+  }
 
   deleteMemory(folder: string, key: string) {
     const query = new URLSearchParams({ key });
     return request<AdminGroupDetailResponse>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/memory?${query.toString()}`,
+      this.resolve(
+        `/api/desktop/admin/groups/${encodeURIComponent(folder)}/memory?${query.toString()}`,
+      ),
       {
         method: "DELETE",
       },
     );
-  },
+  }
 
   listFiles(folder: string, path = ".") {
     const query = new URLSearchParams({ path });
     return request<AdminDirectoryListingDto>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/files?${query.toString()}`,
+      this.resolve(
+        `/api/desktop/admin/groups/${encodeURIComponent(folder)}/files?${query.toString()}`,
+      ),
     );
-  },
+  }
 
   getFile(folder: string, path: string) {
     const query = new URLSearchParams({ path });
     return request<AdminFileContentDto>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/file?${query.toString()}`,
+      this.resolve(
+        `/api/desktop/admin/groups/${encodeURIComponent(folder)}/file?${query.toString()}`,
+      ),
     );
-  },
+  }
 
   updateFile(folder: string, path: string, content: string) {
     return request<AdminFileContentDto>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/file`,
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}/file`),
       {
         method: "PUT",
         body: JSON.stringify({ path, content }),
       },
     );
-  },
+  }
 
   createFile(folder: string, path: string, content: string, createParents = true) {
     return request<AdminFileContentDto>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/file`,
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}/file`),
       {
         method: "POST",
         body: JSON.stringify({ path, content, createParents }),
       },
     );
-  },
+  }
 
   createFolder(folder: string, path: string) {
     return request<AdminDirectoryListingDto>(
-      `/api/admin/groups/${encodeURIComponent(folder)}/folder`,
+      this.resolve(`/api/desktop/admin/groups/${encodeURIComponent(folder)}/folder`),
       {
         method: "POST",
         body: JSON.stringify({ path }),
       },
     );
-  },
-};
+  }
+
+  private resolve(path: string): string {
+    return `${this.baseUrl}${path}`;
+  }
+}

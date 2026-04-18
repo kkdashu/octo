@@ -17,8 +17,6 @@ import { loadAgentProfilesConfig } from "./runtime/profile-config";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { log } from "./logger";
-import { createAdminApiRouter } from "./admin/api";
-import { DEFAULT_ADMIN_PORT, startAdminServer } from "./admin/server";
 import { setupGroupWorkspace } from "./group-workspace";
 
 const TAG = "main";
@@ -167,14 +165,5 @@ log.info(TAG, "Shared Pi-native group runtime host initialized");
 await channelManager.startAll();
 startMessageLoop(db, channelManager, groupQueue);
 startScheduler(db, channelManager, groupQueue);
-
-// ---------------------------------------------------------------------------
-// 7. Start local admin UI
-// ---------------------------------------------------------------------------
-const adminPort = Number(process.env.ADMIN_PORT || DEFAULT_ADMIN_PORT);
-startAdminServer({
-  port: adminPort,
-  api: createAdminApiRouter(db),
-});
 
 log.info(TAG, `=== Octo started on port ${process.env.PORT || 3000} ===`);

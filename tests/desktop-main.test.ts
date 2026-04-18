@@ -227,6 +227,17 @@ describe("desktop sidecar bootstrap", () => {
       expect(handle.groupService.listGroups().map((group) => group.folder)).toEqual([
         "desktop-group",
       ]);
+      const adminListResponse = handle.adminApi.listGroups(
+        new Request("http://localhost/api/desktop/admin/groups"),
+      );
+      expect(adminListResponse.status).toBe(200);
+      expect(await adminListResponse.json()).toMatchObject({
+        groups: [
+          expect.objectContaining({
+            folder: "desktop-group",
+          }),
+        ],
+      });
 
       const workspacePath = join(dir, "groups", "desktop-group");
       expect(existsSync(workspacePath)).toBe(true);

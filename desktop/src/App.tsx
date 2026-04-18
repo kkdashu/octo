@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { AdminPage } from "./components/admin-page";
 import { Composer } from "./components/composer";
 import { GroupSidebar } from "./components/group-sidebar";
 import { TranscriptView } from "./components/transcript-view";
@@ -17,6 +18,8 @@ import type {
   GroupRuntimeSnapshot,
   GroupRuntimeSummary,
 } from "./lib/runtime-types";
+
+type AppView = "chat" | "admin";
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -77,6 +80,7 @@ export function App() {
   const [config] = useState(() => getDesktopConfig());
   const [client] = useState(() => new DesktopClient(config.sidecarBaseUrl));
   const [groups, setGroups] = useState<GroupRuntimeSummary[]>([]);
+  const [activeView, setActiveView] = useState<AppView>("chat");
   const [activeGroupFolder, setActiveGroupFolder] = useState<string | null>(null);
   const [snapshotsByGroup, setSnapshotsByGroup] = useState<Record<string, GroupRuntimeSnapshot>>({});
   const [connectionState, setConnectionState] = useState<GroupConnectionState>("idle");
@@ -341,13 +345,20 @@ export function App() {
     <div className="app-shell">
       <GroupSidebar
         groups={groups}
+        activeView={activeView}
         activeGroupFolder={activeGroupFolder}
         connectionState={connectionState}
         sidecarBaseUrl={config.sidecarBaseUrl}
         isCreatingGroup={isCreatingGroup}
         isCreateFormOpen={isCreateFormOpen}
         createGroupName={createGroupName}
-        onSelect={setActiveGroupFolder}
+        onSelect={(groupFolder) => {
+          setActiveGroupFolder(groupFolder);
+          setActiveView("chat");
+        }}
+        onOpenAdmin={() => {
+          setActiveView("admin");
+        }}
         onCreateGroup={() => {
           void createCliGroup();
         }}
@@ -360,68 +371,74 @@ export function App() {
           setIsCreateFormOpen(false);
         }}
       />
-      <main className="workspace">
-        <header className="workspace-header">
-          <div className="workspace-heading">
-            <p className="eyebrow">Octo Desktop</p>
-            <h1
-              className="workspace-title"
-              title={activeSnapshot?.groupName ?? "未选择 group"}
-            >
-              {activeSnapshot?.groupName ?? "未选择 group"}
-            </h1>
-          </div>
-          <div className="workspace-meta-panel">
-            <div className="workspace-meta-status">
-              <span className={`status-pill status-pill-${connectionState}`}>
-                {connectionState === "open" && "SSE 已连接"}
-                {connectionState === "connecting" && "正在连接"}
-                {connectionState === "error" && "连接异常"}
-                {connectionState === "idle" && "等待选择"}
-              </span>
-            </div>
-            {activeSnapshot ? (
-              <div className="workspace-meta-list">
-                <div className="workspace-meta-row">
-                  <span className="workspace-meta-label">Profile</span>
-                  <span
-                    className="workspace-meta-value"
-                    title={activeSnapshot.profileKey}
-                  >
-                    {activeSnapshot.profileKey}
-                  </span>
-                </div>
-                <div className="workspace-meta-row">
-                  <span className="workspace-meta-label">Session</span>
-                  <span
-                    className="workspace-meta-value workspace-meta-value-session"
-                    title={activeSnapshot.sessionRef ?? "未创建"}
-                  >
-                    {activeSnapshot.sessionRef ?? "未创建"}
-                  </span>
-                </div>
+      <main className={`workspace ${activeView === "admin" ? "workspace-admin" : ""}`}>
+        {activeView === "chat" ? (
+          <>
+            <header className="workspace-header">
+              <div className="workspace-heading">
+                <p className="eyebrow">Octo Desktop</p>
+                <h1
+                  className="workspace-title"
+                  title={activeSnapshot?.groupName ?? "未选择 group"}
+                >
+                  {activeSnapshot?.groupName ?? "未选择 group"}
+                </h1>
               </div>
-            ) : null}
-          </div>
-        </header>
-        <TranscriptView snapshot={activeSnapshot} statusText={statusText} />
-        <Composer
-          value={composerValue}
-          onChange={setComposerValue}
-          onSubmit={() => {
-            void submitPrompt();
-          }}
-          onAbort={() => {
-            void abortRun();
-          }}
-          onNewSession={() => {
-            void createNewSession();
-          }}
-          disabled={!activeGroupFolder}
-          isStreaming={activeSnapshot?.isStreaming ?? false}
-          isSubmitting={isSubmitting}
-          groupName={activeSnapshot?.groupName ?? null}
-        />
+              <div className="workspace-meta-panel">
+                <div className="workspace-meta-status">
+                  <span className={`status-pill status-pill-${connectionState}`}>
+                    {connectionState === "open" && "SSE 已连接"}
+                    {connectionState === "connecting" && "正在连接"}
+                    {connectionState === "error" && "连接异常"}
+                    {connectionState === "idle" && "等待选择"}
+                  </span>
+                </div>
+                {activeSnapshot ? (
+                  <div className="workspace-meta-list">
+                    <div className="workspace-meta-row">
+                      <span className="workspace-meta-label">Profile</span>
+                      <span
+                        className="workspace-meta-value"
+                        title={activeSnapshot.profileKey}
+                      >
+                        {activeSnapshot.profileKey}
+                      </span>
+                    </div>
+                    <div className="workspace-meta-row">
+                      <span className="workspace-meta-label">Session</span>
+                      <span
+                        className="workspace-meta-value workspace-meta-value-session"
+                        title={activeSnapshot.sessionRef ?? "未创建"}
+                      >
+                        {activeSnapshot.sessionRef ?? "未创建"}
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </header>
+            <TranscriptView snapshot={activeSnapshot} statusText={statusText} />
+            <Composer
+              value={composerValue}
+              onChange={setComposerValue}
+              onSubmit={() => {
+                void submitPrompt();
+              }}
+              onAbort={() => {
+                void abortRun();
+              }}
+              onNewSession={() => {
+                void createNewSession();
+              }}
+              disabled={!activeGroupFolder}
+              isStreaming={activeSnapshot?.isStreaming ?? false}
+              isSubmitting={isSubmitting}
+              groupName={activeSnapshot?.groupName ?? null}
+            />
+          </>
+        ) : (
+          <AdminPage sidecarBaseUrl={config.sidecarBaseUrl} />
+        )}
       </main>
     </div>
   );
