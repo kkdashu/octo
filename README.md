@@ -87,7 +87,7 @@ groups/<folder>/
 如需直接修改数据库：
 
 ```bash
-sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax' WHERE folder = 'main';"
+sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax-cn' WHERE folder = 'main';"
 ```
 
 ## Profile 路由
@@ -99,6 +99,8 @@ sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax' 
 - `defaultProfile` 决定新群默认线路
 - `apiFormat` 决定 Pi 走 `anthropic-messages` 还是 OpenAI 兼容 API
 - `provider = moonshot` 会按兼容规则修正到 Moonshot 对应 endpoint
+- `minimax` 使用国际区 Anthropic 兼容 endpoint 与 `MINIMAX_API_KEY`
+- `minimax-cn` 使用中国区 Anthropic 兼容 endpoint 与 `MINIMAX_CN_API_KEY`
 - `codingPlanEnabled` 可用于区分普通 Kimi 与 coding plan 线路
 
 主群里可用的管理工具：

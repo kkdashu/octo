@@ -1,9 +1,9 @@
 import { CronExpressionParser } from "cron-parser";
 import type { Database } from "bun:sqlite";
 import type { ChannelManager } from "./channels/manager";
-import type { GroupQueue } from "./group-queue";
 import { getDueTasks, updateTaskAfterRun } from "./db";
 import { log } from "./logger";
+import type { GroupRuntimeController } from "./runtime/group-runtime-controller";
 
 const TAG = "scheduler";
 
@@ -17,7 +17,7 @@ export function computeNextRun(cronExpr: string): string | null {
 export function startScheduler(
   db: Database,
   channelManager: ChannelManager,
-  groupQueue: GroupQueue,
+  groupQueue: GroupRuntimeController,
   intervalMs = 60_000,
 ): ReturnType<typeof setInterval> {
   log.info(TAG, `Scheduler started (interval: ${intervalMs}ms, tz: ${TIMEZONE})`);
@@ -43,7 +43,7 @@ export function startScheduler(
 function pollAndExecute(
   db: Database,
   _channelManager: ChannelManager,
-  groupQueue: GroupQueue,
+  groupQueue: GroupRuntimeController,
 ) {
   const now = new Date().toISOString();
   const dueTasks = getDueTasks(db, now);

@@ -43,6 +43,7 @@ store/logs/
 
 # Runtime-generated group directories (keep templates only)
 groups/feishu_*/
+groups/cli_*/
 groups/main/.claude/
 groups/main/.pi
 groups/main/CLAUDE.md

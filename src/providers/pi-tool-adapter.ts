@@ -2,12 +2,39 @@ import {
   defineTool,
   type ToolDefinition as PiToolDefinition,
 } from "../../pi-mono/packages/coding-agent/src/index.ts";
-import type { ToolDefinition as OctoToolDefinition } from "./types";
+import type {
+  ToolContentBlock,
+  ToolDefinition as OctoToolDefinition,
+} from "./types";
 
 export const OCTO_TOOL_PREFIX = "mcp__octo-tools__";
 
 export function toPiToolName(toolName: string): string {
   return `${OCTO_TOOL_PREFIX}${toolName}`;
+}
+
+function normalizePiToolContent(content: ToolContentBlock[]): Array<
+  { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+> {
+  return content.map((block) => {
+    if (block.type === "text" || block.type === "image") {
+      return block;
+    }
+
+    if (block.type === "resource") {
+      return {
+        type: "text",
+        text: block.resource.text?.trim() || `[resource] ${block.resource.uri}`,
+      };
+    }
+
+    return {
+      type: "text",
+      text: block.description
+        ? `${block.name}: ${block.description} (${block.uri})`
+        : `${block.name} (${block.uri})`,
+    };
+  });
 }
 
 export function adaptOctoTools(
@@ -22,7 +49,7 @@ export function adaptOctoTools(
       async execute(_toolCallId, params) {
         const result = await tool.handler(params as Record<string, unknown>);
         return {
-          content: result.content,
+          content: normalizePiToolContent(result.content),
           details: {},
         };
       },

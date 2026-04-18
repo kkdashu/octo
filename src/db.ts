@@ -435,6 +435,16 @@ export function updateGroupMetadata(
   });
 }
 
+export function renameGroup(
+  db: Database,
+  folder: string,
+  name: string,
+) {
+  db.query(
+    "UPDATE registered_groups SET name = $name WHERE folder = $folder",
+  ).run({ folder, name });
+}
+
 // ---------------------------------------------------------------------------
 // Group memories
 // ---------------------------------------------------------------------------

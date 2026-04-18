@@ -1,10 +1,16 @@
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ChannelManager } from "./channels/manager";
 import { resolvePersistedPiSessionRef } from "./providers/pi-session-ref";
 import { loadAgentProfilesConfig, resolveAgentProfile } from "./runtime/profile-config";
-import { resolveEnabledExternalMcpServers } from "./runtime/external-mcp-config";
+import {
+  buildGroupMemoryPromptBlock,
+  buildSessionInitialPrompt,
+} from "./runtime/group-memory-prompt";
+import {
+  buildGroupExternalMcpServers,
+  isGroupSkillInstalled,
+} from "./runtime/group-external-mcp";
 import type {
   AgentRuntime,
   ConversationMessageInput,
@@ -23,106 +29,6 @@ import type { MessageSender } from "./tools";
 import { log } from "./logger";
 
 const TAG = "group-queue";
-
-const BUILTIN_GROUP_MEMORY_PROMPT_LABELS: Record<string, string> = {
-  topic_context: "Topic context",
-  response_language: "Preferred explanation language",
-  response_style: "Preferred response style",
-  interaction_rule: "Interaction rule",
-};
-
-const GROUP_MEMORY_VALUE_LIMIT = 240;
-const GROUP_MEMORY_BLOCK_LIMIT = 1200;
-const GROUP_MEMORY_POLICY_LINES = [
-  "Group memory policy:",
-  "- When the user asks you to remember a stable preference, long-term rule, recurring context, or default behavior for this group, save it with remember_group_memory before replying.",
-  "- Prefer builtin keys first: topic_context, response_language, response_style, interaction_rule.",
-  "- Only use a custom key when no builtin key fits the memory.",
-  "- Example: if the user says future replies should be in English, save response_language = English.",
-  "- When the user wants to inspect, update, delete, or clear group memory, use list_group_memory, remember_group_memory, forget_group_memory, or clear_group_memory.",
-];
-const PDF_TO_MARKDOWN_SKILL_NAME = "pdf-to-markdown";
-
-function normalizeGroupMemoryValue(value: string): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= GROUP_MEMORY_VALUE_LIMIT) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, GROUP_MEMORY_VALUE_LIMIT - 3).trimEnd()}...`;
-}
-
-export function buildGroupMemoryPromptBlock(
-  memories: GroupMemoryRow[],
-): string | null {
-  if (memories.length === 0) {
-    return null;
-  }
-
-  const lines = ["Group memory:"];
-
-  for (const memory of memories) {
-    const label =
-      memory.key_type === "builtin"
-        ? (BUILTIN_GROUP_MEMORY_PROMPT_LABELS[memory.key] ?? memory.key)
-        : `Custom ${memory.key}`;
-    const line = `- ${label}: ${normalizeGroupMemoryValue(memory.value)}`;
-    const nextBlock = [...lines, line].join("\n");
-
-    if (nextBlock.length > GROUP_MEMORY_BLOCK_LIMIT) {
-      lines.push("- Additional memory omitted to keep context concise.");
-      break;
-    }
-
-    lines.push(line);
-  }
-
-  return lines.join("\n");
-}
-
-function buildGroupMemoryPolicyBlock(): string {
-  return GROUP_MEMORY_POLICY_LINES.join("\n");
-}
-
-export function buildSessionInitialPrompt(
-  initialPrompt: string,
-  memories: GroupMemoryRow[],
-  shouldInjectMemoryContext: boolean,
-): string {
-  if (!shouldInjectMemoryContext) {
-    return initialPrompt;
-  }
-
-  const sections = [buildGroupMemoryPolicyBlock()];
-  const memoryBlock = buildGroupMemoryPromptBlock(memories);
-  if (memoryBlock) {
-    sections.push(memoryBlock);
-  }
-  sections.push(`Current input:\n${initialPrompt}`);
-
-  return sections.join("\n\n");
-}
-
-export function isGroupSkillInstalled(
-  groupFolder: string,
-  skillName: string,
-  rootDir = process.cwd(),
-): boolean {
-  return existsSync(
-    resolve(rootDir, "groups", groupFolder, ".pi", "skills", skillName, "SKILL.md"),
-  );
-}
-
-export function buildGroupExternalMcpServers(
-  groupFolder: string,
-  rootDir = process.cwd(),
-): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
-  if (!isGroupSkillInstalled(groupFolder, PDF_TO_MARKDOWN_SKILL_NAME, rootDir)) {
-    return {};
-  }
-
-  return resolveEnabledExternalMcpServers(["markitdown"]);
-}
 
 export class GroupQueue {
   private locks: Map<string, Promise<void>> = new Map();
