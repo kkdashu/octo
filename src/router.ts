@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 import type { ChannelManager } from "./channels/manager";
-import type { GroupQueue } from "./group-queue";
 import {
   listGroups,
   getUnprocessedMessages,
@@ -10,6 +9,7 @@ import {
   type MessageRow,
 } from "./db";
 import { log } from "./logger";
+import type { GroupRuntimeController } from "./runtime/group-runtime-controller";
 
 const TAG = "router";
 
@@ -65,7 +65,7 @@ function buildClearSessionSystemReply(): string {
 export function startMessageLoop(
   db: Database,
   channelManager: ChannelManager,
-  groupQueue: GroupQueue,
+  groupQueue: GroupRuntimeController,
   intervalMs = 2000,
 ): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
@@ -83,7 +83,7 @@ export function startMessageLoop(
 function processMessages(
   db: Database,
   channelManager: ChannelManager,
-  groupQueue: GroupQueue,
+  groupQueue: GroupRuntimeController,
 ) {
   const groups = listGroups(db);
   if (groups.length === 0) return;

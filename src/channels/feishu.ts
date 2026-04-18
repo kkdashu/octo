@@ -1013,6 +1013,8 @@ export class FeishuChannel implements Channel {
 
   private client: InstanceType<typeof lark.Client>;
   private eventDispatcher: InstanceType<typeof lark.EventDispatcher>;
+  private wsClient: InstanceType<typeof lark.WSClient> | null = null;
+  private wsStarted = false;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private onMessage: MessageHandler;
   private config: FeishuChannelConfig;
@@ -1040,11 +1042,6 @@ export class FeishuChannel implements Channel {
         await this.handleMessageEvent(event);
       },
     });
-    const wsClient = new lark.WSClient({
-      appId: config.appId,
-      appSecret: config.appSecret
-    });
-    wsClient.start({eventDispatcher: this.eventDispatcher});
   }
 
   async start() {
@@ -1089,12 +1086,25 @@ export class FeishuChannel implements Channel {
     // });
 
     log.info(TAG, `Webhook server started on port ${config.port} at ${config.webhookPath}`);
+
+    if (!this.wsStarted) {
+      this.wsClient = new lark.WSClient({
+        appId: config.appId,
+        appSecret: config.appSecret,
+      });
+      this.wsClient.start({ eventDispatcher: this.eventDispatcher });
+      this.wsStarted = true;
+    }
   }
 
   async stop() {
     log.info(TAG, "Stopping Feishu webhook server");
     this.server?.stop();
     this.server = null;
+    const wsClient = this.wsClient as { stop?: () => void } | null;
+    wsClient?.stop?.();
+    this.wsClient = null;
+    this.wsStarted = false;
   }
 
   async sendMessage(chatId: string, text: string) {

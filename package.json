@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
+    "cli": "bun src/cli.ts",
     "test": "bun test tests/*.test.ts",
     "test:providers": "bun test tests/providers.test.ts",
     "test:pi": "bun test tests/providers.test.ts tests/group-queue.test.ts tests/runtime.test.ts"

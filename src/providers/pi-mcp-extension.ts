@@ -35,6 +35,23 @@ export interface PiMcpExtensionBundle {
   dispose(): Promise<void>;
 }
 
+function buildMcpEnv(
+  serverEnv?: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries({
+    ...process.env,
+    ...(serverEnv ?? {}),
+  })) {
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
 function normalizeMcpContent(content: McpContent[]): Array<
   { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
 > {
@@ -83,10 +100,7 @@ async function createBridge(
     command: serverSpec.command,
     args: serverSpec.args,
     cwd,
-    env: {
-      ...process.env,
-      ...(serverSpec.env ?? {}),
-    },
+    env: buildMcpEnv(serverSpec.env),
     stderr: "pipe",
   });
 
@@ -122,6 +136,12 @@ async function createBridge(
 
 function createExtensionFactory(bridges: McpBridge[]): ExtensionFactory {
   return async (pi) => {
+    if ("on" in pi && typeof pi.on === "function") {
+      pi.on("session_shutdown", async () => {
+        await Promise.allSettled(bridges.map((bridge) => bridge.client.close()));
+      });
+    }
+
     for (const bridge of bridges) {
       for (const tool of bridge.tools) {
         const definition: ToolDefinition = defineTool({

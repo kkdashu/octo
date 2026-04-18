@@ -1,5 +1,3 @@
-import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
 import {
   getGroupByJid,
   initDatabase,
@@ -9,9 +7,8 @@ import {
 } from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
-import { GroupQueue } from "./group-queue";
-import { PiProvider } from "./providers/pi";
 import { DatabaseImageMessagePreprocessor } from "./runtime/image-message-preprocessor";
+import { FeishuGroupAdapter } from "./runtime/feishu-group-adapter";
 import {
   MiniMaxTokenPlanMcpClient,
   resolveMiniMaxTokenPlanMcpConfig,
@@ -19,10 +16,10 @@ import {
 import { loadAgentProfilesConfig } from "./runtime/profile-config";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
-import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
 import { createAdminApiRouter } from "./admin/api";
 import { DEFAULT_ADMIN_PORT, startAdminServer } from "./admin/server";
+import { setupGroupWorkspace } from "./group-workspace";
 
 const TAG = "main";
 
@@ -46,59 +43,8 @@ log.info(TAG, "Creating Feishu channel", {
   port: process.env.PORT || 3000,
 });
 
-const MAIN_TEMPLATE = "groups/MAIN_AGENTS.md";
-const GROUP_TEMPLATE = "groups/GROUP_AGENTS.md";
-const SYSTEM_SKILLS_DIR = "skills/system";
-
 function getDefaultProfileKey(): string {
   return loadAgentProfilesConfig().defaultProfile;
-}
-
-function migrateLegacyGroupWorkspace(folder: string) {
-  const legacyAgentsPath = `groups/${folder}/CLAUDE.md`;
-  const agentsPath = `groups/${folder}/AGENTS.md`;
-  if (!existsSync(agentsPath) && existsSync(legacyAgentsPath)) {
-    copyFileSync(legacyAgentsPath, agentsPath);
-    log.info(TAG, `Migrated ${legacyAgentsPath} → ${agentsPath}`);
-  }
-
-  const legacySkillsDir = `groups/${folder}/.claude/skills`;
-  const piSkillsDir = `groups/${folder}/.pi/skills`;
-  if (!existsSync(piSkillsDir) && existsSync(legacySkillsDir)) {
-    copyDirRecursive(legacySkillsDir, piSkillsDir);
-    log.info(TAG, `Migrated ${legacySkillsDir} → ${piSkillsDir}`);
-  }
-}
-
-function ensureAgentsMd(folder: string, isMain: boolean) {
-  const target = `groups/${folder}/AGENTS.md`;
-  if (existsSync(target)) return;
-  const template = isMain ? MAIN_TEMPLATE : GROUP_TEMPLATE;
-  if (existsSync(template)) {
-    copyFileSync(template, target);
-    log.info(TAG, `Copied ${template} → ${target}`);
-  } else {
-    log.warn(TAG, `Template not found: ${template}, skipping AGENTS.md for ${folder}`);
-  }
-}
-
-function syncSystemSkills(folder: string) {
-  if (!existsSync(SYSTEM_SKILLS_DIR)) return;
-  const targetSkillsDir = `groups/${folder}/.pi/skills`;
-  for (const skillName of readdirSync(SYSTEM_SKILLS_DIR)) {
-    const src = join(SYSTEM_SKILLS_DIR, skillName);
-    if (!statSync(src).isDirectory()) continue;
-    const dest = join(targetSkillsDir, skillName);
-    copyDirRecursive(src, dest);
-  }
-  log.info(TAG, `Synced system skills → groups/${folder}/.pi/skills/`);
-}
-
-function setupGroup(folder: string, isMain: boolean) {
-  mkdirSync(`groups/${folder}`, { recursive: true });
-  migrateLegacyGroupWorkspace(folder);
-  ensureAgentsMd(folder, isMain);
-  syncSystemSkills(folder);
 }
 
 function autoRegisterChat(chatId: string) {
@@ -110,7 +56,7 @@ function autoRegisterChat(chatId: string) {
   if (!hasMain) {
     // First group ever → register as main (no trigger required)
     const folder = "main";
-    setupGroup(folder, true);
+    setupGroupWorkspace(folder, true);
     registerGroup(db, {
       jid: chatId,
       name: "Main (auto)",
@@ -124,7 +70,7 @@ function autoRegisterChat(chatId: string) {
   } else {
     // Subsequent groups → register as regular (trigger required)
     const folder = `feishu_${chatId}`;
-    setupGroup(folder, false);
+    setupGroupWorkspace(folder, false);
     registerGroup(db, {
       jid: chatId,
       name: `Auto (${chatId})`,
@@ -171,7 +117,7 @@ channelManager.register(feishu);
 // ---------------------------------------------------------------------------
 // 4. Ensure main group directory and registration
 // ---------------------------------------------------------------------------
-setupGroup("main", true);
+setupGroupWorkspace("main", true);
 
 const mainChatId = process.env.MAIN_GROUP_CHAT_ID;
 if (mainChatId && !getGroupByJid(db, mainChatId)) {
@@ -193,11 +139,11 @@ if (mainChatId && !getGroupByJid(db, mainChatId)) {
 
 // Ensure all registered groups have AGENTS.md and system skills
 for (const group of listGroups(db)) {
-  setupGroup(group.folder, group.is_main === 1);
+  setupGroupWorkspace(group.folder, group.is_main === 1);
 }
 
 // ---------------------------------------------------------------------------
-// 5. Start unified Pi runtime
+// 5. Build shared Pi-native group runtime host
 // ---------------------------------------------------------------------------
 const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
 if (!minimaxTokenPlanConfig.apiKey) {
@@ -208,23 +154,22 @@ const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
   analyzeImage: minimaxTokenPlanClient,
   db,
 });
-const provider = new PiProvider(imageMessagePreprocessor);
-log.info(TAG, "Unified Pi runtime initialized");
+const groupQueue = new FeishuGroupAdapter({
+  db,
+  channelManager,
+  imageMessagePreprocessor,
+});
+log.info(TAG, "Shared Pi-native group runtime host initialized");
 
 // ---------------------------------------------------------------------------
-// 6. Create group queue
-// ---------------------------------------------------------------------------
-const groupQueue = new GroupQueue(db, channelManager, provider);
-
-// ---------------------------------------------------------------------------
-// 7. Start channels, message loop, and scheduler
+// 6. Start channels, message loop, and scheduler
 // ---------------------------------------------------------------------------
 await channelManager.startAll();
 startMessageLoop(db, channelManager, groupQueue);
 startScheduler(db, channelManager, groupQueue);
 
 // ---------------------------------------------------------------------------
-// 8. Start local admin UI
+// 7. Start local admin UI
 // ---------------------------------------------------------------------------
 const adminPort = Number(process.env.ADMIN_PORT || DEFAULT_ADMIN_PORT);
 startAdminServer({

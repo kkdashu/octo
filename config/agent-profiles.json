@@ -1,5 +1,5 @@
 {
-  "defaultProfile": "codex",
+  "defaultProfile": "minimax-cn",
   "profiles": {
     "claude": {
       "apiFormat": "anthropic",
@@ -33,10 +33,17 @@
     },
     "minimax": {
       "apiFormat": "anthropic",
-      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "baseUrl": "https://api.minimax.io/anthropic",
       "apiKeyEnv": "MINIMAX_API_KEY",
       "model": "MiniMax-M2.7",
       "provider": "minimax"
+    },
+    "minimax-cn": {
+      "apiFormat": "anthropic",
+      "baseUrl": "https://api.minimaxi.com/anthropic",
+      "apiKeyEnv": "MINIMAX_CN_API_KEY",
+      "model": "MiniMax-M2.7",
+      "provider": "minimax-cn"
     }
   }
 }
