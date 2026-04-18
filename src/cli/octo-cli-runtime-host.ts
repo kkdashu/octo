@@ -1,41 +1,20 @@
-import { existsSync, readFileSync } from "node:fs";
-import type { Database } from "bun:sqlite";
-import { resolve } from "node:path";
 import {
   AgentSessionRuntime,
-  parseSessionEntries,
-  type SessionHeader,
 } from "@mariozechner/pi-coding-agent";
 import type {
   AgentSessionServices,
   AgentSessionRuntimeDiagnostic,
   CreateAgentSessionRuntimeFactory,
 } from "@mariozechner/pi-coding-agent";
-import { saveSessionRef, type RegisteredGroup } from "../db";
-import { GroupService } from "../group-service";
-import { resolveGroupSessionRef } from "../runtime/pi-group-runtime-factory";
+import type { RegisteredGroup } from "../db";
 import { CliStateStore } from "./state-store";
+import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
 
 export interface OctoCliRuntimeHostOptions {
-  db: Database;
-  groupService: GroupService;
+  manager: GroupRuntimeManager;
   stateStore: CliStateStore;
-  rootDir?: string;
   currentGroup: RegisteredGroup;
-}
-
-function getSessionHeader(sessionPath: string): SessionHeader | null {
-  if (!existsSync(sessionPath)) {
-    return null;
-  }
-
-  const entries = parseSessionEntries(readFileSync(sessionPath, "utf8"));
-  const header = entries[0];
-  if (header?.type !== "session" || typeof header.id !== "string") {
-    return null;
-  }
-
-  return header;
+  runtime: AgentSessionRuntime;
 }
 
 const unsupportedCreateRuntime: CreateAgentSessionRuntimeFactory = async () => {
@@ -44,45 +23,39 @@ const unsupportedCreateRuntime: CreateAgentSessionRuntimeFactory = async () => {
 
 export class OctoCliRuntimeHost extends AgentSessionRuntime {
   private currentGroup: RegisteredGroup;
-  private readonly rootDir: string;
-  private readonly wrappedRuntime: AgentSessionRuntime;
+  private currentRuntime: AgentSessionRuntime;
 
-  constructor(
-    runtimeHost: AgentSessionRuntime,
-    private readonly options: OctoCliRuntimeHostOptions,
-  ) {
+  constructor(private readonly options: OctoCliRuntimeHostOptions) {
     super(
-      runtimeHost.session,
-      runtimeHost.services,
+      options.runtime.session,
+      options.runtime.services,
       unsupportedCreateRuntime,
-      [...runtimeHost.diagnostics],
-      runtimeHost.modelFallbackMessage,
+      [...options.runtime.diagnostics],
+      options.runtime.modelFallbackMessage,
     );
-    this.wrappedRuntime = runtimeHost;
     this.currentGroup = options.currentGroup;
-    this.rootDir = options.rootDir ?? process.cwd();
-    this.persistActiveSessionRef();
+    this.currentRuntime = options.runtime;
     this.options.stateStore.setCurrentGroupFolder(this.currentGroup.folder);
   }
 
   override get services(): AgentSessionServices {
-    return this.wrappedRuntime.services;
+    return this.currentRuntime.services;
   }
 
   override get session() {
-    return this.wrappedRuntime.session;
+    return this.currentRuntime.session;
   }
 
   override get cwd(): string {
-    return this.wrappedRuntime.cwd;
+    return this.currentRuntime.cwd;
   }
 
   override get diagnostics(): readonly AgentSessionRuntimeDiagnostic[] {
-    return this.wrappedRuntime.diagnostics;
+    return this.currentRuntime.diagnostics;
   }
 
   override get modelFallbackMessage(): string | undefined {
-    return this.wrappedRuntime.modelFallbackMessage;
+    return this.currentRuntime.modelFallbackMessage;
   }
 
   getCurrentGroup(): RegisteredGroup {
@@ -97,114 +70,62 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
         : never
       : never;
   }): Promise<{ cancelled: boolean }> {
-    const result = await this.wrappedRuntime.newSession(options);
-    if (!result.cancelled) {
-      this.persistActiveSessionRef();
-    }
-    return result;
+    const result = await this.options.manager.createNewSession(
+      this.currentGroup.folder,
+      options,
+    );
+    this.currentRuntime = result.runtime;
+    return { cancelled: result.cancelled };
   }
 
   override async fork(entryId: string): Promise<{
     cancelled: boolean;
     selectedText?: string;
   }> {
-    const result = await this.wrappedRuntime.fork(entryId);
-    if (!result.cancelled) {
-      this.persistActiveSessionRef();
-    }
-    return result;
+    const result = await this.options.manager.fork(this.currentGroup.folder, entryId);
+    this.currentRuntime = result.runtime;
+    return { cancelled: result.cancelled };
   }
 
   override async switchSession(
     sessionPath: string,
     cwdOverride?: string,
   ): Promise<{ cancelled: boolean }> {
-    const targetCwd = cwdOverride ?? getSessionHeader(sessionPath)?.cwd;
-    if (!targetCwd) {
-      throw new Error(`Cannot resolve session cwd: ${sessionPath}`);
-    }
-
-    const targetGroup = this.getGroupForCwd(targetCwd);
-    if (!targetGroup) {
-      throw new Error(`Session is outside Octo registered groups: ${sessionPath}`);
-    }
-
-    const result = await this.wrappedRuntime.switchSession(sessionPath, targetCwd);
+    const result = await this.options.manager.switchSession(
+      this.currentGroup.folder,
+      sessionPath,
+      cwdOverride,
+    );
     if (!result.cancelled) {
-      this.currentGroup = targetGroup;
-      this.persistActiveSessionRef();
-      this.options.stateStore.setCurrentGroupFolder(targetGroup.folder);
+      this.currentGroup = result.group;
+      this.currentRuntime = result.runtime;
+      this.options.stateStore.setCurrentGroupFolder(result.group.folder);
     }
-    return result;
+    return { cancelled: result.cancelled };
   }
 
   async switchGroup(group: RegisteredGroup): Promise<{ cancelled: boolean }> {
-    const workingDirectory = resolve(this.rootDir, "groups", group.folder);
-    const sessionRef = resolveGroupSessionRef(
-      this.options.db,
-      group.folder,
-      workingDirectory,
-    );
-    const result = await this.wrappedRuntime.switchSession(sessionRef, workingDirectory);
-    if (!result.cancelled) {
-      this.currentGroup = group;
-      this.persistActiveSessionRef();
-      this.options.stateStore.setCurrentGroupFolder(group.folder);
-    }
-    return result;
+    const result = await this.options.manager.switchGroup(group.folder);
+    this.currentGroup = result.group;
+    this.currentRuntime = result.runtime;
+    this.options.stateStore.setCurrentGroupFolder(group.folder);
+    return { cancelled: false };
   }
 
-  async importFromJsonl(
+  override async importFromJsonl(
     inputPath: string,
     _cwdOverride?: string,
   ): Promise<{ cancelled: boolean }> {
-    const result = await this.wrappedRuntime.importFromJsonl(inputPath, this.cwd);
-    if (!result.cancelled) {
-      this.persistActiveSessionRef();
-    }
-    return result;
+    const result = await this.options.manager.importFromJsonl(
+      this.currentGroup.folder,
+      inputPath,
+    );
+    this.currentRuntime = result.runtime;
+    return { cancelled: result.cancelled };
   }
 
   override async dispose(): Promise<void> {
     this.options.stateStore.setCurrentGroupFolder(this.currentGroup.folder);
-    await this.wrappedRuntime.dispose();
-  }
-
-  private getGroupForCwd(cwd: string): RegisteredGroup | null {
-    const groupsRoot = resolve(this.rootDir, "groups");
-    const normalizedCwd = resolve(cwd);
-    const prefix = `${groupsRoot}/`;
-    const prefixAlt = `${groupsRoot}\\`;
-
-    if (
-      normalizedCwd !== groupsRoot &&
-      !normalizedCwd.startsWith(prefix) &&
-      !normalizedCwd.startsWith(prefixAlt)
-    ) {
-      return null;
-    }
-
-    const folder = normalizedCwd
-      .slice(groupsRoot.length)
-      .replace(/^[/\\]+/, "")
-      .split(/[\\/]/)[0];
-    if (!folder) {
-      return null;
-    }
-
-    return this.options.groupService.getGroupByFolder(folder);
-  }
-
-  private persistActiveSessionRef(): void {
-    const sessionFile = this.wrappedRuntime.session.sessionFile;
-    if (!sessionFile) {
-      return;
-    }
-
-    saveSessionRef(this.options.db, this.currentGroup.folder, sessionFile);
+    await this.options.manager.dispose();
   }
 }
-
-export const __test__ = {
-  getSessionHeader,
-};

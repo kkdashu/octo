@@ -5,6 +5,8 @@ node_modules
 out
 dist
 *.tgz
+desktop/src-tauri/target
+desktop/src-tauri/gen
 
 # code coverage
 coverage

@@ -6,12 +6,12 @@ import { ChannelManager } from "./channels/manager";
 import { type RegisteredGroup, getGroupByJid, initDatabase } from "./db";
 import { GroupService } from "./group-service";
 import { log } from "./logger";
-import { createPiGroupRuntime } from "./runtime/pi-group-runtime-factory";
 import type { PiGroupRuntimeContext } from "./runtime/pi-group-runtime-factory";
 import type { MessageSender } from "./tools";
 import { CliStateStore } from "./cli/state-store";
 import { createOctoGroupExtension } from "./cli/octo-group-extension";
 import { OctoCliRuntimeHost } from "./cli/octo-cli-runtime-host";
+import { GroupRuntimeManager } from "./kernel/group-runtime-manager";
 
 const TAG = "cli";
 
@@ -103,7 +103,7 @@ export function createCliMessageSender(
   });
 }
 
-function registerOutboundFeishuChannel(channelManager: ChannelManager): void {
+export function registerOutboundFeishuChannel(channelManager: ChannelManager): void {
   const appId = process.env.FEISHU_APP_ID?.trim();
   const appSecret = process.env.FEISHU_APP_SECRET?.trim();
   if (!appId || !appSecret) {
@@ -164,20 +164,20 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     getRuntimeHost: () => runtimeHostRef,
   });
 
-  const { runtime } = await createPiGroupRuntime({
+  const runtimeManager = new GroupRuntimeManager({
     db,
-    groupFolder: initialGroup.folder,
+    groupService,
     rootDir: process.cwd(),
     createMessageSender: createCliMessageSender(db, channelManager),
     getExtensionFactories: async () => [octoGroupExtension],
   });
+  const runtime = await runtimeManager.ensureRuntime(initialGroup.folder);
 
-  const runtimeHost = new OctoCliRuntimeHost(runtime, {
-    db,
-    groupService,
+  const runtimeHost = new OctoCliRuntimeHost({
+    manager: runtimeManager,
     stateStore,
     currentGroup: initialGroup,
-    rootDir: process.cwd(),
+    runtime,
   });
   runtimeHostRef = runtimeHost;
 

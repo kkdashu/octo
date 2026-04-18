@@ -1,0 +1,20 @@
+{
+  "name": "octo-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:ui": "bun build ./src/index.html --outdir ./dist --target browser",
+    "dev": "bun ./scripts/dev.ts",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3"
+  }
+}

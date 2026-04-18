@@ -2,11 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSessionRuntime } from "@mariozechner/pi-coding-agent";
+import {
+  SessionManager,
+  type AgentSessionRuntime,
+} from "@mariozechner/pi-coding-agent";
 import { getSessionRef, initDatabase, saveSessionRef } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { OctoCliRuntimeHost } from "../src/cli/octo-cli-runtime-host";
 import { CliStateStore } from "../src/cli/state-store";
+import { GroupRuntimeManager } from "../src/kernel/group-runtime-manager";
+import type { MessageSender } from "../src/tools";
 
 function createProfilesConfig(rootDir: string): string {
   const configPath = join(rootDir, "agent-profiles.json");
@@ -55,7 +60,27 @@ function createFakeRuntime(initialSessionPath: string, initialCwd: string): {
     importFromJsonl: Array<{ inputPath: string; cwdOverride?: string }>;
   };
 } {
-  const session = { sessionFile: initialSessionPath, extensionRunner: undefined, dispose() {} };
+  const sessionManager = SessionManager.inMemory(initialCwd);
+  let sessionFile = initialSessionPath;
+  const session = {
+    sessionManager,
+    get sessionFile() {
+      return sessionFile;
+    },
+    set sessionFile(next: string | undefined) {
+      sessionFile = next ?? sessionFile;
+    },
+    get isStreaming() {
+      return false;
+    },
+    async prompt() {},
+    async followUp() {},
+    async steer() {},
+    async abort() {},
+    subscribe() {
+      return () => undefined;
+    },
+  };
   const services = { cwd: initialCwd, agentDir: join(initialCwd, ".pi", "agent") };
   const runtimeState = {
     cwd: initialCwd,
@@ -99,6 +124,14 @@ function createFakeRuntime(initialSessionPath: string, initialCwd: string): {
   };
 }
 
+function createNoopMessageSender(): MessageSender {
+  return {
+    send: async () => undefined,
+    sendImage: async () => undefined,
+    refreshGroupMetadata: async () => ({ count: 0 }),
+  };
+}
+
 describe("OctoCliRuntimeHost", () => {
   test("rejects switchSession outside Octo registered groups", async () => {
     const rootDir = mkdtempSync(join(tmpdir(), "octo-cli-runtime-host-"));
@@ -113,13 +146,29 @@ describe("OctoCliRuntimeHost", () => {
       const currentCwd = join(rootDir, "groups", currentGroup.folder);
       const currentSessionPath = createSessionFile(currentCwd, "current");
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const { runtime } = createFakeRuntime(currentSessionPath, currentCwd);
-      const host = new OctoCliRuntimeHost(runtime, {
+      const current = createFakeRuntime(currentSessionPath, currentCwd);
+      const manager = new GroupRuntimeManager({
         db,
         groupService,
+        rootDir,
+        createMessageSender: () => createNoopMessageSender(),
+        createGroupRuntime: async (groupFolder) => {
+          if (groupFolder !== currentGroup.folder) {
+            throw new Error(`Unexpected test group: ${groupFolder}`);
+          }
+
+          return {
+            group: currentGroup,
+            runtime: current.runtime,
+            sessionRef: currentSessionPath,
+          };
+        },
+      });
+      const host = new OctoCliRuntimeHost({
+        manager,
         stateStore,
         currentGroup,
-        rootDir,
+        runtime: current.runtime,
       });
 
       const outsideCwd = join(rootDir, "outside");
@@ -156,24 +205,44 @@ describe("OctoCliRuntimeHost", () => {
       const secondSessionPath = createSessionFile(secondCwd, "second");
       saveSessionRef(db, secondGroup.folder, secondSessionPath);
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const { runtime, calls } = createFakeRuntime(firstSessionPath, firstCwd);
-      const host = new OctoCliRuntimeHost(runtime, {
+      const first = createFakeRuntime(firstSessionPath, firstCwd);
+      const second = createFakeRuntime(secondSessionPath, secondCwd);
+      const manager = new GroupRuntimeManager({
         db,
         groupService,
+        rootDir,
+        createMessageSender: () => createNoopMessageSender(),
+        createGroupRuntime: async (groupFolder) => {
+          if (groupFolder === firstGroup.folder) {
+            return {
+              group: firstGroup,
+              runtime: first.runtime,
+              sessionRef: firstSessionPath,
+            };
+          }
+
+          if (groupFolder === secondGroup.folder) {
+            return {
+              group: secondGroup,
+              runtime: second.runtime,
+              sessionRef: secondSessionPath,
+            };
+          }
+
+          throw new Error(`Unexpected test group: ${groupFolder}`);
+        },
+      });
+      const host = new OctoCliRuntimeHost({
+        manager,
         stateStore,
         currentGroup: firstGroup,
-        rootDir,
+        runtime: first.runtime,
       });
 
       await host.switchGroup(secondGroup);
 
       expect(host.getCurrentGroup().folder).toBe(secondGroup.folder);
-      expect(calls.switchSession).toEqual([
-        {
-          sessionPath: secondSessionPath,
-          cwdOverride: secondCwd,
-        },
-      ]);
+      expect(host.session.sessionFile).toBe(secondSessionPath);
       expect(getSessionRef(db, secondGroup.folder)).toBe(secondSessionPath);
       expect(stateStore.getCurrentGroupFolder()).toBe(secondGroup.folder);
     } finally {
@@ -199,18 +268,34 @@ describe("OctoCliRuntimeHost", () => {
       const cwd = join(rootDir, "groups", group.folder);
       const sessionPath = createSessionFile(cwd, "base");
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const { runtime, calls } = createFakeRuntime(sessionPath, cwd);
-      const host = new OctoCliRuntimeHost(runtime, {
+      const current = createFakeRuntime(sessionPath, cwd);
+      const manager = new GroupRuntimeManager({
         db,
         groupService,
+        rootDir,
+        createMessageSender: () => createNoopMessageSender(),
+        createGroupRuntime: async (groupFolder) => {
+          if (groupFolder !== group.folder) {
+            throw new Error(`Unexpected test group: ${groupFolder}`);
+          }
+
+          return {
+            group,
+            runtime: current.runtime,
+            sessionRef: sessionPath,
+          };
+        },
+      });
+      const host = new OctoCliRuntimeHost({
+        manager,
         stateStore,
         currentGroup: group,
-        rootDir,
+        runtime: current.runtime,
       });
 
       await host.importFromJsonl("/tmp/source.jsonl", "/tmp/should-be-ignored");
 
-      expect(calls.importFromJsonl).toEqual([
+      expect(current.calls.importFromJsonl).toEqual([
         {
           inputPath: "/tmp/source.jsonl",
           cwdOverride: cwd,
