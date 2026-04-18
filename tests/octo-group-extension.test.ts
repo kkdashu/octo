@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionFactory } from "../pi-mono/packages/coding-agent/src/index.ts";
+import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { initDatabase } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { createOctoGroupExtension } from "../src/cli/octo-group-extension";

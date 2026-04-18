@@ -1,17 +1,16 @@
+import { existsSync, readFileSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
 import {
   AgentSessionRuntime,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
+  parseSessionEntries,
+  type SessionHeader,
+} from "@mariozechner/pi-coding-agent";
 import type {
   AgentSessionServices,
   AgentSessionRuntimeDiagnostic,
   CreateAgentSessionRuntimeFactory,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
-import {
-  loadEntriesFromFile,
-  type SessionHeader,
-} from "../../pi-mono/packages/coding-agent/src/core/session-manager.ts";
+} from "@mariozechner/pi-coding-agent";
 import { saveSessionRef, type RegisteredGroup } from "../db";
 import { GroupService } from "../group-service";
 import { resolveGroupSessionRef } from "../runtime/pi-group-runtime-factory";
@@ -26,10 +25,17 @@ export interface OctoCliRuntimeHostOptions {
 }
 
 function getSessionHeader(sessionPath: string): SessionHeader | null {
-  const entries = loadEntriesFromFile(sessionPath);
-  return (
-    entries.find((entry): entry is SessionHeader => entry.type === "session") ?? null
-  );
+  if (!existsSync(sessionPath)) {
+    return null;
+  }
+
+  const entries = parseSessionEntries(readFileSync(sessionPath, "utf8"));
+  const header = entries[0];
+  if (header?.type !== "session" || typeof header.id !== "string") {
+    return null;
+  }
+
+  return header;
 }
 
 const unsupportedCreateRuntime: CreateAgentSessionRuntimeFactory = async () => {

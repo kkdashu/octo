@@ -12,7 +12,7 @@ import {
   createWriteTool,
   DefaultResourceLoader,
   ModelRegistry,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
+} from "@mariozechner/pi-coding-agent";
 import { log } from "../logger";
 import type { ImageMessagePreprocessor } from "../runtime/image-message-preprocessor";
 import type {

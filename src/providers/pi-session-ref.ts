@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-import { SessionManager } from "../../pi-mono/packages/coding-agent/src/index.ts";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 
 export function getPiSessionDir(workingDirectory: string): string {
   return resolve(workingDirectory, ".pi", "sessions");

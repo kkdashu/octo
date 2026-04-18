@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSessionRuntime } from "../pi-mono/packages/coding-agent/src/index.ts";
+import type { AgentSessionRuntime } from "@mariozechner/pi-coding-agent";
 import { getSessionRef, initDatabase, saveSessionRef } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { OctoCliRuntimeHost } from "../src/cli/octo-cli-runtime-host";

@@ -5,7 +5,7 @@ import {
   defineTool,
   type ExtensionFactory,
   type ToolDefinition,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
+} from "@mariozechner/pi-coding-agent";
 import { log } from "../logger";
 import type { ExternalMcpServerSpec } from "./types";
 

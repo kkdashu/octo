@@ -1,7 +1,7 @@
 import {
   defineTool,
   type ToolDefinition as PiToolDefinition,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
+} from "@mariozechner/pi-coding-agent";
 import type {
   ToolContentBlock,
   ToolDefinition as OctoToolDefinition,

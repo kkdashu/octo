@@ -1,4 +1,4 @@
-import type { ExtensionFactory } from "../../pi-mono/packages/coding-agent/src/index.ts";
+import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import type { RegisteredGroup } from "../db";
 import { GroupService } from "../group-service";
 import { formatGroupOption, selectCliGroup } from "./group-selector";

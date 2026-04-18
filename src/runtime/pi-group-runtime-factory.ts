@@ -22,8 +22,7 @@ import {
   type CreateAgentSessionRuntimeResult,
   type ExtensionFactory,
   type SessionStartEvent,
-} from "../../pi-mono/packages/coding-agent/src/index.ts";
-import { emitSessionShutdownEvent } from "../../pi-mono/packages/coding-agent/src/core/extensions/runner.ts";
+} from "@mariozechner/pi-coding-agent";
 import {
   deleteSessionRef,
   getGroupByFolder,
@@ -45,6 +44,7 @@ import { createGroupToolDefs } from "../tools";
 import { buildGroupExternalMcpServers } from "./group-external-mcp";
 import { buildGroupMemoryAppendSystemPrompt } from "./group-memory-prompt";
 import { resolveAgentProfile } from "./profile-config";
+import { emitPiSessionShutdown } from "./pi-session-shutdown";
 import type { ResolvedAgentProfile } from "./types";
 
 type PiApi = "anthropic-messages" | "openai-responses" | "openai-completions";
@@ -359,7 +359,7 @@ export async function createPiGroupSessionHost(
       diagnostics: created.diagnostics,
       cwd: created.services.cwd,
       async dispose() {
-        await emitSessionShutdownEvent(created.session.extensionRunner);
+        await emitPiSessionShutdown(created.session.extensionRunner);
         created.session.dispose();
       },
     },

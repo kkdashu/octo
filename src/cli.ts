@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
-import { InteractiveMode } from "../pi-mono/packages/coding-agent/src/index.ts";
+import { InteractiveMode } from "@mariozechner/pi-coding-agent";
 import { FeishuChannel } from "./channels/feishu";
 import { ChannelManager } from "./channels/manager";
 import { type RegisteredGroup, getGroupByJid, initDatabase } from "./db";
