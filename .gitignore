@@ -46,6 +46,7 @@ store/logs/
 # Runtime-generated group directories (keep templates only)
 groups/feishu_*/
 groups/cli_*/
+groups/main/
 groups/main/.claude/
 groups/main/.pi
 groups/main/CLAUDE.md
@@ -56,3 +57,4 @@ wiki-workspace
 
 LobsterAI-main
 pi-mono
+open-agents
