@@ -50,7 +50,7 @@ function createWorkspace() {
     channelType: "feishu",
     requiresTrigger: true,
     isMain: false,
-    agentProvider: "claude",
+    profileKey: "claude",
   });
 
   upsertGroupMemory(db, {
@@ -61,7 +61,7 @@ function createWorkspace() {
     source: "tool",
   });
 
-  writeFileSync(join(dir, "groups", "test-group", "CLAUDE.md"), "hello admin\n", "utf-8");
+  writeFileSync(join(dir, "groups", "test-group", "AGENTS.md"), "hello admin\n", "utf-8");
 
   return { dir, db, configPath };
 }
@@ -121,7 +121,7 @@ describe("admin api router", () => {
           name: "Renamed Group",
           triggerPattern: "@octo",
           requiresTrigger: false,
-          agentProvider: "minimax",
+          profileKey: "minimax",
         }),
       }),
       { folder: "test-group" },
@@ -132,7 +132,7 @@ describe("admin api router", () => {
     expect(updated?.name).toBe("Renamed Group");
     expect(updated?.trigger_pattern).toBe("@octo");
     expect(updated?.requires_trigger).toBe(0);
-    expect(updated?.agent_provider).toBe("minimax");
+    expect(updated?.profile_key).toBe("minimax");
 
     const invalidResponse = await router.patchGroup(withParams(
       new Request("http://localhost/api/admin/groups/test-group", {
@@ -142,7 +142,7 @@ describe("admin api router", () => {
           name: "Broken Group",
           triggerPattern: "",
           requiresTrigger: true,
-          agentProvider: "missing-profile",
+          profileKey: "missing-profile",
         }),
       }),
       { folder: "test-group" },
@@ -250,12 +250,12 @@ describe("admin api router", () => {
     const router = createAdminApiRouter(db, { rootDir: dir });
 
     const readResponse = router.getFile(withParams(
-      new Request("http://localhost/api/admin/groups/test-group/file?path=CLAUDE.md"),
+      new Request("http://localhost/api/admin/groups/test-group/file?path=AGENTS.md"),
       { folder: "test-group" },
     ));
     expect(readResponse.status).toBe(200);
     expect(await readResponse.json()).toMatchObject({
-      path: "CLAUDE.md",
+      path: "AGENTS.md",
       content: "hello admin\n",
     });
 
@@ -264,7 +264,7 @@ describe("admin api router", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          path: "CLAUDE.md",
+          path: "AGENTS.md",
           content: "updated\n",
         }),
       }),
@@ -272,7 +272,7 @@ describe("admin api router", () => {
     ));
     expect(writeResponse.status).toBe(200);
     expect(await writeResponse.json()).toMatchObject({
-      path: "CLAUDE.md",
+      path: "AGENTS.md",
       content: "updated\n",
     });
   });

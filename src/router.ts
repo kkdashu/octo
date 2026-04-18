@@ -167,7 +167,10 @@ function processMessages(
 
     if (groupQueue.isActive(group.folder)) {
       log.info(TAG, `Pushing follow-up to active session: ${group.folder}`);
-      groupQueue.pushMessage(group.folder, prompt);
+      groupQueue.pushMessage(group.folder, {
+        mode: "follow_up",
+        text: prompt,
+      });
     } else {
       log.info(TAG, `Starting new agent session for: ${group.folder}`);
       groupQueue.enqueue(group.folder, prompt);

@@ -1,7 +1,6 @@
 import { mkdirSync, existsSync, copyFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  clearAllSessionIds,
   getGroupByJid,
   initDatabase,
   insertMessage,
@@ -11,14 +10,13 @@ import {
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
 import { GroupQueue } from "./group-queue";
-import { ClaudeProvider } from "./providers/claude";
-import { AnthropicLoggingProxyManager } from "./runtime/anthropic-logging-proxy";
+import { PiProvider } from "./providers/pi";
 import { DatabaseImageMessagePreprocessor } from "./runtime/image-message-preprocessor";
 import {
   MiniMaxTokenPlanMcpClient,
   resolveMiniMaxTokenPlanMcpConfig,
 } from "./runtime/minimax-token-plan-mcp";
-import { OpenAIProxyManager } from "./runtime/openai-proxy";
+import { loadAgentProfilesConfig } from "./runtime/profile-config";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
@@ -34,10 +32,6 @@ const TAG = "main";
 log.info(TAG, "Initializing database at store/messages.db");
 const db = initDatabase("store/messages.db");
 log.info(TAG, "Database initialized successfully");
-const clearedSessionCount = clearAllSessionIds(db);
-log.info(TAG, "Cleared persisted Claude session ids on startup", {
-  clearedSessionCount,
-});
 
 // ---------------------------------------------------------------------------
 // 2. Create channel manager
@@ -52,38 +46,58 @@ log.info(TAG, "Creating Feishu channel", {
   port: process.env.PORT || 3000,
 });
 
-const MAIN_TEMPLATE = "groups/MAIN_CLAUDE.md";
-const GROUP_TEMPLATE = "groups/GROUP_CLAUDE.md";
+const MAIN_TEMPLATE = "groups/MAIN_AGENTS.md";
+const GROUP_TEMPLATE = "groups/GROUP_AGENTS.md";
+const SYSTEM_SKILLS_DIR = "skills/system";
 
-function ensureClaudeMd(folder: string, isMain: boolean) {
-  const target = `groups/${folder}/CLAUDE.md`;
+function getDefaultProfileKey(): string {
+  return loadAgentProfilesConfig().defaultProfile;
+}
+
+function migrateLegacyGroupWorkspace(folder: string) {
+  const legacyAgentsPath = `groups/${folder}/CLAUDE.md`;
+  const agentsPath = `groups/${folder}/AGENTS.md`;
+  if (!existsSync(agentsPath) && existsSync(legacyAgentsPath)) {
+    copyFileSync(legacyAgentsPath, agentsPath);
+    log.info(TAG, `Migrated ${legacyAgentsPath} → ${agentsPath}`);
+  }
+
+  const legacySkillsDir = `groups/${folder}/.claude/skills`;
+  const piSkillsDir = `groups/${folder}/.pi/skills`;
+  if (!existsSync(piSkillsDir) && existsSync(legacySkillsDir)) {
+    copyDirRecursive(legacySkillsDir, piSkillsDir);
+    log.info(TAG, `Migrated ${legacySkillsDir} → ${piSkillsDir}`);
+  }
+}
+
+function ensureAgentsMd(folder: string, isMain: boolean) {
+  const target = `groups/${folder}/AGENTS.md`;
   if (existsSync(target)) return;
   const template = isMain ? MAIN_TEMPLATE : GROUP_TEMPLATE;
   if (existsSync(template)) {
     copyFileSync(template, target);
     log.info(TAG, `Copied ${template} → ${target}`);
   } else {
-    log.warn(TAG, `Template not found: ${template}, skipping CLAUDE.md for ${folder}`);
+    log.warn(TAG, `Template not found: ${template}, skipping AGENTS.md for ${folder}`);
   }
 }
 
-const SYSTEM_SKILLS_DIR = "skills/system";
-
 function syncSystemSkills(folder: string) {
   if (!existsSync(SYSTEM_SKILLS_DIR)) return;
-  const targetSkillsDir = `groups/${folder}/.claude/skills`;
+  const targetSkillsDir = `groups/${folder}/.pi/skills`;
   for (const skillName of readdirSync(SYSTEM_SKILLS_DIR)) {
     const src = join(SYSTEM_SKILLS_DIR, skillName);
     if (!statSync(src).isDirectory()) continue;
     const dest = join(targetSkillsDir, skillName);
     copyDirRecursive(src, dest);
   }
-  log.info(TAG, `Synced system skills → groups/${folder}/.claude/skills/`);
+  log.info(TAG, `Synced system skills → groups/${folder}/.pi/skills/`);
 }
 
 function setupGroup(folder: string, isMain: boolean) {
   mkdirSync(`groups/${folder}`, { recursive: true });
-  ensureClaudeMd(folder, isMain);
+  migrateLegacyGroupWorkspace(folder);
+  ensureAgentsMd(folder, isMain);
   syncSystemSkills(folder);
 }
 
@@ -104,6 +118,7 @@ function autoRegisterChat(chatId: string) {
       channelType: "feishu",
       requiresTrigger: false,
       isMain: true,
+      profileKey: getDefaultProfileKey(),
     });
     log.info(TAG, `Auto-registered as MAIN group: ${chatId} → groups/${folder}`);
   } else {
@@ -117,6 +132,7 @@ function autoRegisterChat(chatId: string) {
       channelType: "feishu",
       requiresTrigger: true,
       isMain: false,
+      profileKey: getDefaultProfileKey(),
     });
     log.info(TAG, `Auto-registered as regular group: ${chatId} → groups/${folder}`);
   }
@@ -155,9 +171,7 @@ channelManager.register(feishu);
 // ---------------------------------------------------------------------------
 // 4. Ensure main group directory and registration
 // ---------------------------------------------------------------------------
-mkdirSync("groups/main", { recursive: true });
-ensureClaudeMd("main", true);
-syncSystemSkills("main");
+setupGroup("main", true);
 
 const mainChatId = process.env.MAIN_GROUP_CHAT_ID;
 if (mainChatId && !getGroupByJid(db, mainChatId)) {
@@ -168,6 +182,7 @@ if (mainChatId && !getGroupByJid(db, mainChatId)) {
     channelType: "feishu",
     requiresTrigger: false,
     isMain: true,
+    profileKey: getDefaultProfileKey(),
   });
   log.info(TAG, `Main group registered: ${mainChatId}`);
 } else if (mainChatId) {
@@ -176,18 +191,14 @@ if (mainChatId && !getGroupByJid(db, mainChatId)) {
   log.warn(TAG, "MAIN_GROUP_CHAT_ID not set, will auto-register on first message");
 }
 
-// Ensure all registered groups have CLAUDE.md and system skills
+// Ensure all registered groups have AGENTS.md and system skills
 for (const group of listGroups(db)) {
   setupGroup(group.folder, group.is_main === 1);
 }
 
 // ---------------------------------------------------------------------------
-// 5. Start unified Claude runtime
+// 5. Start unified Pi runtime
 // ---------------------------------------------------------------------------
-const proxyManager = new OpenAIProxyManager();
-await proxyManager.start();
-const anthropicLoggingProxyManager = new AnthropicLoggingProxyManager();
-await anthropicLoggingProxyManager.start();
 const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
 if (!minimaxTokenPlanConfig.apiKey) {
   log.warn(TAG, "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders");
@@ -197,12 +208,8 @@ const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
   analyzeImage: minimaxTokenPlanClient,
   db,
 });
-const provider = new ClaudeProvider(
-  proxyManager,
-  anthropicLoggingProxyManager,
-  imageMessagePreprocessor,
-);
-log.info(TAG, "Unified Claude runtime initialized");
+const provider = new PiProvider(imageMessagePreprocessor);
+log.info(TAG, "Unified Pi runtime initialized");
 
 // ---------------------------------------------------------------------------
 // 6. Create group queue

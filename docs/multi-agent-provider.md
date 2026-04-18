@@ -1,137 +1,122 @@
-# 统一 Claude Runtime 与多 Profile 路由
+# Pi Runtime 与 Profile 路由
 
-## 背景
+## 目标
 
-Octo 以前同时维护 Claude、Codex、Kimi 三套 SDK 链路，工作目录识别、工具接入、session 恢复方式都不同，导致切换成本和维护成本都很高。
-
-现在已经统一为：
-
-- 底层只保留 Claude Agent SDK
-- `agent_provider` 只表示 profile key
-- 只有真正的 OpenAI 格式线路通过本地兼容 proxy 接入
-- Moonshot/Kimi 线路按 Anthropic 兼容 endpoint 直连
+Octo 当前只保留一个运行时实现：`PiProvider`。`profile_key` 的作用只是选择模型线路和上游接口，不再表示 SDK 类型。
 
 ## 主链路
 
 ```text
 消息进入
   → GroupQueue
-    → resolveAgentProfile(group.agent_provider)
-    → ClaudeProvider.startSession()
-      → Claude Agent SDK query()
-        → anthropic profile: 直连 Anthropic / Moonshot Anthropic 兼容上游
-        → openai profile: 走 OpenAIProxyManager
+    → 读取 registered_groups.profile_key
+    → resolveAgentProfile(profileKey)
+    → PiProvider.startSession()
+      → createAgentSession(pi-mono)
+        → builtin tools
+        → adaptOctoTools()
+        → createPiMcpExtensionBundle()
 ```
 
-## Profile 配置
+关键文件：
 
-配置文件示例：
+- `src/group-queue.ts`
+- `src/providers/pi.ts`
+- `src/runtime/profile-config.ts`
+- `src/providers/pi-tool-adapter.ts`
+- `src/providers/pi-mcp-extension.ts`
 
-```json
-{
-  "defaultProfile": "claude",
-  "profiles": {
-    "claude": {
-      "apiFormat": "anthropic",
-      "baseUrl": "https://api.anthropic.com",
-      "apiKeyEnv": "ANTHROPIC_API_KEY",
-      "model": "claude-sonnet-4-6"
-    },
-    "codex": {
-      "apiFormat": "openai",
-      "upstreamApi": "responses",
-      "baseUrl": "https://api.openai.com",
-      "apiKeyEnv": "OPENAI_API_KEY",
-      "model": "gpt-5.4",
-      "provider": "openai"
-    },
-    "kimi": {
-      "apiFormat": "anthropic",
-      "baseUrl": "https://api.moonshot.cn/anthropic",
-      "apiKeyEnv": "MOONSHOT_API_KEY",
-      "model": "kimi-k2.5",
-      "provider": "moonshot"
-    },
-    "kimi-cli": {
-      "apiFormat": "anthropic",
-      "baseUrl": "https://api.kimi.com/coding",
-      "apiKeyEnv": "MOONSHOT_API_KEY",
-      "model": "kimi-k2.5",
-      "codingPlanEnabled": true,
-      "provider": "moonshot"
-    },
-    "minimax": {
-      "apiFormat": "anthropic",
-      "baseUrl": "https://api.minimaxi.com/anthropic",
-      "apiKeyEnv": "MINIMAX_API_KEY",
-      "model": "MiniMax-M2.7",
-      "provider": "minimax"
-    }
-  }
-}
-```
+## Profile 语义
 
-`src/runtime/profile-config.ts` 会把它解析成 `ResolvedAgentProfile`，并负责：
+Profile 配置定义了：
 
-- fallback 到 `defaultProfile`
-- 校验 profile 是否存在
-- 从 `apiKeyEnv` 读取真实密钥
-- 按 provider 兼容规则修正真实 endpoint
-- 生成 Claude SDK 需要的 `ANTHROPIC_*` 环境变量
+- `profileKey`
+- `apiFormat`
+- `upstreamApi`
+- `baseUrl`
+- `apiKeyEnv`
+- `model`
+- `provider`
+- `codingPlanEnabled`
 
-其中 Moonshot/Kimi 会按 `mini_cowork` 的已验证行为解析：
+`src/runtime/profile-config.ts` 负责：
 
-- `kimi` → `https://api.moonshot.cn/anthropic`
-- `kimi-cli` → `https://api.kimi.com/coding`
-- 两者都保持 `apiFormat = "anthropic"`
+- 加载 profile 配置文件
+- 对不存在的 key 回退到 `defaultProfile`
+- 校验默认 profile 是否存在
+- 从环境变量读取真实 API key
+- 对 Moonshot 线路做兼容修正
 
-MiniMax 线路按官方 Anthropic 兼容文档接入：
+`PiProvider` 会把 profile 映射成 Pi 所需的 API 类型：
 
-- `minimax` → `https://api.minimaxi.com/anthropic`
-- 保持 `apiFormat = "anthropic"`
-- 不经过本地 OpenAI proxy
-
-## OpenAI 兼容 Proxy
-
-`src/runtime/openai-proxy.ts` 参考了 `mini_cowork/src/proxy.ts`，但做了关键调整：
-
-- 只启动一个 HTTP server
-- 每个 session 调用 `acquire()` 时分配独立 `routeId`
-- route URL 形如 `http://127.0.0.1:<port>/proxy/<routeId>`
-- 每条 route 绑定一份独立 upstream 配置
-- session 结束后调用 `release()` 释放 route
-
-这样可以避免多个群并发时共享同一个 upstream 配置而串线。
+- `anthropic` → `anthropic-messages`
+- `openai + responses` → `openai-responses`
+- `openai + chat_completions` → `openai-completions`
 
 ## Session 语义
 
-`registered_groups.agent_provider` 保留原字段名，但含义变为 profile key。  
-`updateGroupProvider()` 切 profile 时不再删除 `sessions` 表记录。
+数据库中的 `sessions.session_ref` 保存的是 Pi 本地 session 文件引用，而不是远端 provider 的 session ID。
+
+相关逻辑：
+
+- `src/providers/pi-session-ref.ts`：创建、恢复、解析 session ref
+- `src/group-queue.ts`：从数据库读取 `session_ref`，校验文件存在后恢复
+- `src/db.ts`：统一使用 `getSessionRef()` / `saveSessionRef()` / `deleteSessionRef()`
+
+行为约定：
+
+- 切 profile 不自动删除 session ref
+- 显式清上下文时才使用 `clear_session`
+- 若数据库里保存的 session ref 已失效，启动时会自动丢弃
+
+## 工作区与技能
+
+每个群目录统一采用：
+
+```text
+groups/<folder>/
+  AGENTS.md
+  .pi/
+    skills/
+    sessions/
+```
+
+相关代码：
+
+- `src/index.ts`：创建 `AGENTS.md`、同步 system skills、迁移 legacy workspace
+- `src/group-queue.ts`：按 `.pi/skills/<name>/SKILL.md` 做 group skill gate
+- `src/tools.ts`：curated skill 安装目标为 `.pi/skills`
+
+启动时的迁移辅助只做复制：
+
+- `CLAUDE.md` → `AGENTS.md`
+- `.claude/skills` → `.pi/skills`
+
+运行时不会继续读取 `.claude/skills`。
+
+## Tool / API 命名
+
+Pi-native 命名统一使用 profile 语义：
+
+- `switch_profile`
+- `profileKey`
+- `profile_key`
+
+相关文件：
+
+- `src/tools.ts`
+- `src/admin/api.ts`
+- `src/admin/types.ts`
+- `src/admin/App.tsx`
+
+## 外部 MCP
+
+外部 MCP 配置由 `src/runtime/external-mcp-config.ts` 读取，再由 `src/providers/pi-mcp-extension.ts` 转成 Pi extension。
 
 这意味着：
 
-- 同一群切换 `claude` / `codex` / `kimi` / `minimax` 后仍可恢复同一 Claude session
-- 如果需要重置上下文，应该做显式工具，而不是隐式删 session
+- MCP 以 Pi 的 extension 方式注入，不再依赖 Claude SDK 兼容层
+- tool name 统一映射为 `mcp__<server>__<tool>`
+- 可按群技能决定是否启用某些 MCP server
 
-## 工具与目录
-
-- 所有工具统一通过 Claude SDK 的进程内 MCP 暴露
-- 只保留 `CLAUDE.md` 和 `.claude/skills`
-- 不再生成 `AGENTS.md`、`.agents/skills`
-- 不再需要 `src/mcp-stdio-server.ts` 和 `/internal/*` API
-
-## 管理工具
-
-- `switch_provider`：切换目标群的 profile key
-- `list_profiles`：列出当前配置里的 profile、模型、apiFormat、upstreamApi
-
-其中 `minimax` 会作为新的可选 profile key 暴露给管理后台和工具层。
-
-## 删除的旧链路
-
-- `src/providers/codex.ts`
-- `src/providers/kimi.ts`
-- `src/providers/registry.ts`
-- `src/mcp-stdio-server.ts`
-
-运行时已经不再依赖这些文件。
+`pdf-to-markdown` 就是当前的一个例子：只有当群目录存在 `.pi/skills/pdf-to-markdown/SKILL.md` 时，`markitdown` MCP 才会被注入。

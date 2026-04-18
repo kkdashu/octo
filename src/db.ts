@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { loadAgentProfilesConfig } from "./runtime/profile-config";
 
 // ---------------------------------------------------------------------------
 // Database initialization
@@ -21,7 +22,8 @@ export function initDatabase(dbPath: string): Database {
       trigger_pattern TEXT NOT NULL DEFAULT '',
       added_at TEXT NOT NULL,
       requires_trigger INTEGER DEFAULT 1,
-      is_main INTEGER DEFAULT 0
+      is_main INTEGER DEFAULT 0,
+      profile_key TEXT NOT NULL
     )
   `);
 
@@ -43,7 +45,7 @@ export function initDatabase(dbPath: string): Database {
   db.run(`
     CREATE TABLE IF NOT EXISTS sessions (
       group_folder TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL
+      session_ref TEXT NOT NULL
     )
   `);
 
@@ -102,13 +104,54 @@ export function initDatabase(dbPath: string): Database {
   } catch {
     // Column already exists, ignore
   }
-  try {
-    db.run("ALTER TABLE registered_groups ADD COLUMN agent_provider TEXT DEFAULT 'claude'");
-  } catch {
-    // Column already exists, ignore
-  }
+  migrateRegisteredGroupsProfileKey(db);
+  migrateSessionsSessionRef(db);
 
   return db;
+}
+
+type TableInfoRow = {
+  name: string;
+};
+
+function getTableColumns(db: Database, tableName: string): string[] {
+  return (db
+    .query(`PRAGMA table_info(${tableName})`)
+    .all() as TableInfoRow[]).map((row) => row.name);
+}
+
+function getDefaultProfileKey(): string {
+  return loadAgentProfilesConfig().defaultProfile;
+}
+
+function migrateRegisteredGroupsProfileKey(db: Database): void {
+  const columns = getTableColumns(db, "registered_groups");
+  if (columns.includes("profile_key")) {
+    return;
+  }
+
+  if (columns.includes("agent_provider")) {
+    db.run("ALTER TABLE registered_groups RENAME COLUMN agent_provider TO profile_key");
+    return;
+  }
+
+  db.run("ALTER TABLE registered_groups ADD COLUMN profile_key TEXT");
+  db.query(
+    `UPDATE registered_groups
+     SET profile_key = $profileKey
+     WHERE profile_key IS NULL OR trim(profile_key) = ''`,
+  ).run({ profileKey: getDefaultProfileKey() });
+}
+
+function migrateSessionsSessionRef(db: Database): void {
+  const columns = getTableColumns(db, "sessions");
+  if (columns.includes("session_ref")) {
+    return;
+  }
+
+  if (columns.includes("session_id")) {
+    db.run("ALTER TABLE sessions RENAME COLUMN session_id TO session_ref");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +167,7 @@ export interface RegisteredGroup {
   added_at: string;
   requires_trigger: number;
   is_main: number;
-  agent_provider: string;
+  profile_key: string;
 }
 
 export interface MessageRow {
@@ -330,12 +373,12 @@ export function registerGroup(
     triggerPattern?: string;
     requiresTrigger?: boolean;
     isMain?: boolean;
-    agentProvider?: string;
+    profileKey?: string;
   },
 ) {
   db.query(
-    `INSERT INTO registered_groups (jid, name, folder, channel_type, trigger_pattern, added_at, requires_trigger, is_main, agent_provider)
-     VALUES ($jid, $name, $folder, $channelType, $triggerPattern, $addedAt, $requiresTrigger, $isMain, $agentProvider)
+    `INSERT INTO registered_groups (jid, name, folder, channel_type, trigger_pattern, added_at, requires_trigger, is_main, profile_key)
+     VALUES ($jid, $name, $folder, $channelType, $triggerPattern, $addedAt, $requiresTrigger, $isMain, $profileKey)
      ON CONFLICT(jid) DO UPDATE SET
        name = $name,
        folder = $folder,
@@ -352,18 +395,18 @@ export function registerGroup(
     addedAt: new Date().toISOString(),
     requiresTrigger: group.requiresTrigger === false ? 0 : 1,
     isMain: group.isMain ? 1 : 0,
-    agentProvider: group.agentProvider ?? "claude",
+    profileKey: group.profileKey ?? getDefaultProfileKey(),
   });
 }
 
-export function updateGroupProvider(
+export function updateGroupProfile(
   db: Database,
   folder: string,
-  provider: string,
+  profileKey: string,
 ) {
   db.query(
-    "UPDATE registered_groups SET agent_provider = $provider WHERE folder = $folder",
-  ).run({ folder, provider });
+    "UPDATE registered_groups SET profile_key = $profileKey WHERE folder = $folder",
+  ).run({ folder, profileKey });
 }
 
 export function updateGroupMetadata(
@@ -373,7 +416,7 @@ export function updateGroupMetadata(
     name: string;
     triggerPattern: string;
     requiresTrigger: boolean;
-    agentProvider: string;
+    profileKey: string;
   },
 ) {
   db.query(
@@ -381,14 +424,14 @@ export function updateGroupMetadata(
      SET name = $name,
          trigger_pattern = $triggerPattern,
          requires_trigger = $requiresTrigger,
-         agent_provider = $agentProvider
+         profile_key = $profileKey
      WHERE folder = $folder`,
   ).run({
     folder,
     name: patch.name,
     triggerPattern: patch.triggerPattern,
     requiresTrigger: patch.requiresTrigger ? 1 : 0,
-    agentProvider: patch.agentProvider,
+    profileKey: patch.profileKey,
   });
 }
 
@@ -504,28 +547,28 @@ export function clearGroupMemories(
 // Sessions
 // ---------------------------------------------------------------------------
 
-export function getSessionId(
+export function getSessionRef(
   db: Database,
   folder: string,
 ): string | null {
   const row = db
-    .query("SELECT session_id FROM sessions WHERE group_folder = $groupFolder")
-    .get({ groupFolder: folder }) as { session_id: string } | null;
-  return row?.session_id ?? null;
+    .query("SELECT session_ref FROM sessions WHERE group_folder = $groupFolder")
+    .get({ groupFolder: folder }) as { session_ref: string } | null;
+  return row?.session_ref ?? null;
 }
 
-export function saveSessionId(
+export function saveSessionRef(
   db: Database,
   folder: string,
-  sessionId: string,
+  sessionRef: string,
 ) {
   db.query(
-    `INSERT INTO sessions (group_folder, session_id) VALUES ($groupFolder, $sessionId)
-     ON CONFLICT(group_folder) DO UPDATE SET session_id = $sessionId`,
-  ).run({ groupFolder: folder, sessionId });
+    `INSERT INTO sessions (group_folder, session_ref) VALUES ($groupFolder, $sessionRef)
+     ON CONFLICT(group_folder) DO UPDATE SET session_ref = $sessionRef`,
+  ).run({ groupFolder: folder, sessionRef });
 }
 
-export function deleteSessionId(
+export function deleteSessionRef(
   db: Database,
   folder: string,
 ) {
@@ -534,7 +577,7 @@ export function deleteSessionId(
   ).run({ groupFolder: folder });
 }
 
-export function clearAllSessionIds(
+export function clearAllSessionRefs(
   db: Database,
 ): number {
   const row = db

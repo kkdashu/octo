@@ -43,7 +43,7 @@ export const adminApiClient = {
       name: string;
       triggerPattern: string;
       requiresTrigger: boolean;
-      agentProvider: string;
+      profileKey: string;
     },
   ) {
     return request<AdminGroupDetailResponse>(

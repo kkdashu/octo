@@ -21,6 +21,7 @@ function registerTestGroup(db: Database, jid = "oc_test") {
     channelType: "feishu",
     requiresTrigger: true,
     isMain: false,
+    profileKey: "claude",
   });
 }
 

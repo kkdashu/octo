@@ -15,7 +15,7 @@ export interface AdminGroupDto {
   triggerPattern: string;
   requiresTrigger: boolean;
   isMain: boolean;
-  agentProvider: string;
+  profileKey: string;
   addedAt: string;
 }
 

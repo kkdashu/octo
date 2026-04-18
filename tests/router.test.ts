@@ -19,7 +19,7 @@ describe("router /clear command", () => {
         channelType: "feishu",
         requiresTrigger: false,
         isMain: true,
-        agentProvider: "claude",
+        profileKey: "claude",
       });
 
       insertMessage(db, {
@@ -55,8 +55,8 @@ describe("router /clear command", () => {
           clearCount += 1;
           return {
             closedActiveSession: false,
-            previousSessionId: "old-session",
-            sessionId: "new-session",
+            previousSessionRef: "old-session",
+            sessionRef: "new-session",
             generation: 1,
           };
         },

@@ -16,7 +16,7 @@ import {
   type GroupMemoryKeyType,
   upsertGroupMemory,
   updateTaskStatus,
-  updateGroupProvider,
+  updateGroupProfile,
   validateGroupMemoryKey,
   type RegisteredGroup,
 } from "./db";
@@ -40,8 +40,8 @@ export interface MessageSender {
   refreshGroupMetadata(): Promise<{ count: number }>;
   clearSession?(groupFolder: string): Promise<{
     closedActiveSession: boolean;
-    previousSessionId: string | null;
-    sessionId: string;
+    previousSessionRef: string | null;
+    sessionRef: string;
     generation: number;
   }>;
 }
@@ -148,8 +148,8 @@ async function handleClearSessionTool(
       {
         type: "text" as const,
         text: result.closedActiveSession
-          ? `Session cleared for group ${formatGroupLabel(target)}. A fresh Claude session (${result.sessionId}) is ready, and the previous active session was closed. This only clears the AI session.`
-          : `Session cleared for group ${formatGroupLabel(target)}. A fresh Claude session (${result.sessionId}) is ready for the next message. This only clears the AI session.`,
+          ? `Session cleared for group ${formatGroupLabel(target)}. A fresh AI session (${result.sessionRef}) is ready, and the previous active session was closed. This only clears the AI session.`
+          : `Session cleared for group ${formatGroupLabel(target)}. A fresh AI session (${result.sessionRef}) is ready for the next message. This only clears the AI session.`,
       },
     ],
   };
@@ -660,7 +660,7 @@ export function createGroupToolDefs(
             if (descMatch?.[1]) description = descMatch[1].trim();
           }
           const installed = existsSync(
-            join(root, "groups", groupFolder, ".claude", "skills", name, "SKILL.md"),
+            join(root, "groups", groupFolder, ".pi", "skills", name, "SKILL.md"),
           );
           skills.push({ name, description, installed });
         }
@@ -683,7 +683,7 @@ export function createGroupToolDefs(
           log.warn(TAG, `[install_curated_skill] Skill not found: ${args.skillName}`);
           return { content: [{ type: "text", text: `Skill not found: ${args.skillName}` }] };
         }
-        const dest = join(root, "groups", groupFolder, ".claude", "skills", args.skillName as string);
+        const dest = join(root, "groups", groupFolder, ".pi", "skills", args.skillName as string);
         if (existsSync(join(dest, "SKILL.md"))) {
           log.info(TAG, `[install_curated_skill] Already installed: ${args.skillName}`);
           return { content: [{ type: "text", text: `Skill already installed: ${args.skillName}` }] };
@@ -723,7 +723,10 @@ export function createGroupToolDefs(
           },
           handler: async (args) => {
             log.info(TAG, `[register_group] called by main group`, args);
-            registerGroup(db, args as { jid: string; name: string; folder: string; triggerPattern: string });
+            registerGroup(db, {
+              ...(args as { jid: string; name: string; folder: string; triggerPattern: string }),
+              profileKey: loadAgentProfilesConfig().defaultProfile,
+            });
             log.info(TAG, `[register_group] Group registered: ${args.jid}`);
             return { content: [{ type: "text", text: "Group registered" }] };
           },
@@ -807,43 +810,43 @@ export function createGroupToolDefs(
           },
         },
         {
-          name: "switch_provider",
+          name: "switch_profile",
           description: "Switch the agent profile for a group. Use list_profiles to see available profile keys.",
           schema: {
             type: "object",
             properties: {
               targetGroupFolder: { type: "string", description: "Target group folder name" },
-              provider: { type: "string", description: "Profile key (e.g. claude, codex, kimi, kimi-cli)" },
+              profileKey: { type: "string", description: "Profile key (e.g. claude, codex, kimi, kimi-cli)" },
             },
-            required: ["targetGroupFolder", "provider"],
+            required: ["targetGroupFolder", "profileKey"],
           },
           handler: async (args) => {
             const folder = args.targetGroupFolder as string;
-            const provider = args.provider as string;
-            log.info(TAG, `[switch_provider] called by main group`, { folder, provider });
+            const profileKey = args.profileKey as string;
+            log.info(TAG, `[switch_profile] called by main group`, { folder, profileKey });
             const target = getGroupByFolder(db, folder);
             if (!target) {
               return { content: [{ type: "text", text: `Group not found: ${folder}` }] };
             }
             const config = loadAgentProfilesConfig();
-            if (!config.profiles[provider]) {
+            if (!config.profiles[profileKey]) {
               const available = Object.keys(config.profiles).sort().join(", ");
               return {
                 content: [
                   {
                     type: "text",
-                    text: `Unknown profile: ${provider}. Available profiles: ${available}`,
+                    text: `Unknown profile: ${profileKey}. Available profiles: ${available}`,
                   },
                 ],
               };
             }
-            updateGroupProvider(db, folder, provider);
-            log.info(TAG, `[switch_provider] Switched ${folder} to profile: ${provider}`);
+            updateGroupProfile(db, folder, profileKey);
+            log.info(TAG, `[switch_profile] Switched ${folder} to profile: ${profileKey}`);
             return {
               content: [
                 {
                   type: "text",
-                  text: `Group "${target.name}" (${folder}) switched to profile: ${provider}`,
+                  text: `Group "${target.name}" (${folder}) switched to profile: ${profileKey}`,
                 },
               ],
             };

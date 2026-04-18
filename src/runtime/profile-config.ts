@@ -6,7 +6,6 @@ import type {
   AgentProfileConfig,
   AgentProfilesConfig,
   AgentProfileSummary,
-  ProxyRouteHandle,
   ResolvedAgentProfile,
 } from "./types";
 
@@ -171,20 +170,4 @@ export function listAgentProfiles(): AgentProfileSummary[] {
       codingPlanEnabled: compatibleProfile.codingPlanEnabled ?? false,
     };
   });
-}
-
-export function buildClaudeSdkEnv(
-  profile: ResolvedAgentProfile,
-  proxyRoute?: ProxyRouteHandle,
-): Record<string, string> {
-  const env = { ...process.env } as Record<string, string>;
-  const apiKey = proxyRoute?.apiKey ?? profile.apiKey;
-  const baseUrl = proxyRoute?.baseUrl ?? profile.baseUrl;
-
-  env.ANTHROPIC_AUTH_TOKEN = apiKey;
-  env.ANTHROPIC_API_KEY = apiKey;
-  env.ANTHROPIC_BASE_URL = baseUrl;
-  env.ANTHROPIC_MODEL = profile.model;
-
-  return env;
 }

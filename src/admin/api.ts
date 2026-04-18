@@ -50,7 +50,7 @@ const patchGroupSchema = z.object({
   name: z.string().trim().min(1, "群名称不能为空"),
   triggerPattern: z.string(),
   requiresTrigger: z.boolean(),
-  agentProvider: z.string().trim().min(1, "AI 引擎不能为空"),
+  profileKey: z.string().trim().min(1, "模型线路不能为空"),
 });
 
 const createFileSchema = z.object({
@@ -125,7 +125,7 @@ function toAdminGroupDto(group: RegisteredGroup): AdminGroupDto {
     triggerPattern: group.trigger_pattern,
     requiresTrigger: group.requires_trigger === 1,
     isMain: group.is_main === 1,
-    agentProvider: group.agent_provider,
+    profileKey: group.profile_key,
     addedAt: group.added_at,
   };
 }
@@ -224,11 +224,11 @@ export function createAdminApiRouter(
 
         const body = patchGroupSchema.parse(await req.json());
         const config = loadAgentProfilesConfig();
-        if (!config.profiles[body.agentProvider]) {
+        if (!config.profiles[body.profileKey]) {
           return errorResponse(
             400,
             "invalid_profile",
-            `Unknown profile: ${body.agentProvider}`,
+            `Unknown profile: ${body.profileKey}`,
           );
         }
 

@@ -29,13 +29,6 @@ export interface ResolvedAgentProfile {
   codingPlanEnabled: boolean;
 }
 
-export interface ProxyRouteHandle {
-  routeId: string;
-  baseUrl: string;
-  apiKey: string;
-  release(): void;
-}
-
 export interface AgentProfileSummary {
   profileKey: string;
   apiFormat: ApiFormat;

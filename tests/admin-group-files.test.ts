@@ -32,14 +32,14 @@ describe("admin group file helpers", () => {
   test("lists and reads files inside the group root", () => {
     const rootDir = createWorkspace();
     cleanupDirs.push(rootDir);
-    writeFileSync(join(rootDir, "groups", "test-group", "CLAUDE.md"), "# Hello\n", "utf-8");
+    writeFileSync(join(rootDir, "groups", "test-group", "AGENTS.md"), "# Hello\n", "utf-8");
 
     const listing = listGroupDirectory("test-group", ".", rootDir);
-    const file = readGroupTextFile("test-group", "CLAUDE.md", rootDir);
+    const file = readGroupTextFile("test-group", "AGENTS.md", rootDir);
 
     expect(listing.path).toBe(".");
     expect(listing.entries).toEqual([
-      { kind: "file", name: "CLAUDE.md", path: "CLAUDE.md", size: 8 },
+      { kind: "file", name: "AGENTS.md", path: "AGENTS.md", size: 8 },
     ]);
     expect(file.content).toBe("# Hello\n");
   });

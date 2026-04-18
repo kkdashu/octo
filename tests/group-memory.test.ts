@@ -6,25 +6,29 @@ import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
 import {
   BUILTIN_GROUP_MEMORY_KEYS,
-  clearAllSessionIds,
+  clearAllSessionRefs,
   clearGroupMemories,
   createTask,
   deleteGroupMemory,
-  getSessionId,
+  getSessionRef,
   initDatabase,
   isBuiltinGroupMemoryKey,
   isSupportedGroupMemoryKey,
   isValidCustomGroupMemoryKey,
   listGroupMemories,
   registerGroup,
-  saveSessionId,
+  saveSessionRef,
   upsertGroupMemory,
   validateGroupMemoryKey,
 } from "../src/db";
 import { GroupQueue } from "../src/group-queue";
 import { __test__ as schedulerTestHelpers } from "../src/task-scheduler";
 import { createGroupToolDefs } from "../src/tools";
-import type { AgentProvider, SessionConfig } from "../src/providers/types";
+import type {
+  AgentRuntime,
+  ConversationMessageInput,
+  OpenConversationInput,
+} from "../src/providers/types";
 
 const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -43,7 +47,7 @@ function createWorkspace(): { dir: string; db: Database } {
     channelType: "feishu",
     requiresTrigger: false,
     isMain: true,
-    agentProvider: "claude",
+    profileKey: "claude",
   });
   registerGroup(db, {
     jid: "oc_english",
@@ -52,7 +56,7 @@ function createWorkspace(): { dir: string; db: Database } {
     channelType: "feishu",
     requiresTrigger: true,
     isMain: false,
-    agentProvider: "claude",
+    profileKey: "claude",
   });
   registerGroup(db, {
     jid: "oc_other",
@@ -61,7 +65,7 @@ function createWorkspace(): { dir: string; db: Database } {
     channelType: "feishu",
     requiresTrigger: true,
     isMain: false,
-    agentProvider: "claude",
+    profileKey: "claude",
   });
 
   return { dir, db };
@@ -75,30 +79,48 @@ function createFakeChannelManager(): ChannelManager {
   } as unknown as ChannelManager;
 }
 
-function createCapturingProvider() {
-  let resolveStartConfig!: (config: SessionConfig) => void;
-  const started = new Promise<SessionConfig>((resolve) => {
-    resolveStartConfig = resolve;
+function createCapturingRuntime() {
+  let resolveOpenConfig!: (config: OpenConversationInput) => void;
+  const opened = new Promise<OpenConversationInput>((resolve) => {
+    resolveOpenConfig = resolve;
   });
 
-  const provider: AgentProvider = {
+  let resolveFirstSend!: (input: ConversationMessageInput) => void;
+  const firstSend = new Promise<ConversationMessageInput>((resolve) => {
+    resolveFirstSend = resolve;
+  });
+
+  let firstSendResolved = false;
+  let releaseCompletion!: () => void;
+  const completionReady = new Promise<void>((resolve) => {
+    releaseCompletion = resolve;
+  });
+
+  const runtime: AgentRuntime = {
     name: "mock",
-    startSession: async (config) => {
-      resolveStartConfig(config);
+    openConversation: async (config) => {
+      resolveOpenConfig(config);
       return {
-        session: {
-          push: () => {},
+        conversation: {
+          send: async (input) => {
+            if (!firstSendResolved) {
+              firstSendResolved = true;
+              resolveFirstSend(input);
+              releaseCompletion();
+            }
+          },
           close: () => {},
         },
         events: (async function* () {
-          yield { type: "result" as const, sessionId: "mock-session-1" };
+          await completionReady;
+          yield { type: "completed" as const, sessionRef: "mock-session-1" };
         })(),
       };
     },
-    clearContext: async () => ({ sessionId: "cleared-session" }),
+    resetSession: async () => ({ sessionRef: "cleared-session" }),
   };
 
-  return { provider, started };
+  return { runtime, opened, firstSend };
 }
 
 const cleanupDirs: string[] = [];
@@ -185,12 +207,12 @@ describe("group memory data layer", () => {
     const { dir, db } = createWorkspace();
     cleanupDirs.push(dir);
 
-    saveSessionId(db, "main", "session-main");
-    saveSessionId(db, "english-group", "session-english");
+    saveSessionRef(db, "main", "session-main");
+    saveSessionRef(db, "english-group", "session-english");
 
-    expect(clearAllSessionIds(db)).toBe(2);
-    expect(getSessionId(db, "main")).toBeNull();
-    expect(getSessionId(db, "english-group")).toBeNull();
+    expect(clearAllSessionRefs(db)).toBe(2);
+    expect(getSessionRef(db, "main")).toBeNull();
+    expect(getSessionRef(db, "english-group")).toBeNull();
   });
 });
 
@@ -298,8 +320,8 @@ describe("group memory tools", () => {
       ...sender,
       clearSession: async () => ({
         closedActiveSession: true,
-        previousSessionId: "old-session",
-        sessionId: "fresh-session",
+        previousSessionRef: "old-session",
+        sessionRef: "fresh-session",
         generation: 2,
       }),
     };
@@ -313,7 +335,7 @@ describe("group memory tools", () => {
       content: [
         {
           type: "text",
-          text: 'Session cleared for group "Other Group" (other-group). A fresh Claude session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
+          text: 'Session cleared for group "Other Group" (other-group). A fresh AI session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
         },
       ],
     });
@@ -324,7 +346,7 @@ describe("group memory tools", () => {
       content: [
         {
           type: "text",
-          text: 'Session cleared for group "Other Group" (other-group). A fresh Claude session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
+          text: 'Session cleared for group "Other Group" (other-group). A fresh AI session (fresh-session) is ready, and the previous active session was closed. This only clears the AI session.',
         },
       ],
     });
@@ -337,11 +359,11 @@ describe("group memory prompt injection", () => {
     cleanupDirs.push(dir);
     process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
 
-    const { provider, started } = createCapturingProvider();
+    const { runtime, firstSend } = createCapturingRuntime();
     const groupQueue = new GroupQueue(
       db,
       createFakeChannelManager(),
-      provider,
+      runtime,
       1,
     );
 
@@ -350,12 +372,13 @@ describe("group memory prompt injection", () => {
       "[2026-03-29T07:16:02.252Z] Alice: 记住：你要输出英文",
     );
 
-    const sessionConfig = await started;
-    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
-    expect(sessionConfig.initialPrompt).toContain("remember_group_memory before replying");
-    expect(sessionConfig.initialPrompt).toContain("response_language = English");
-    expect(sessionConfig.initialPrompt).toContain("Current input:");
-    expect(sessionConfig.initialPrompt).toContain("记住：你要输出英文");
+    const firstTurn = await firstSend;
+    expect(firstTurn.mode).toBe("prompt");
+    expect(firstTurn.text).toContain("Group memory policy:");
+    expect(firstTurn.text).toContain("remember_group_memory before replying");
+    expect(firstTurn.text).toContain("response_language = English");
+    expect(firstTurn.text).toContain("Current input:");
+    expect(firstTurn.text).toContain("记住：你要输出英文");
   });
 
   test("injects group memory into a fresh group session prompt", async () => {
@@ -378,11 +401,11 @@ describe("group memory prompt injection", () => {
       source: "tool",
     });
 
-    const { provider, started } = createCapturingProvider();
+    const { runtime, firstSend } = createCapturingRuntime();
     const groupQueue = new GroupQueue(
       db,
       createFakeChannelManager(),
-      provider,
+      runtime,
       1,
     );
 
@@ -391,15 +414,16 @@ describe("group memory prompt injection", () => {
       "[2026-03-29T08:00:00.000Z] Alice: 请给我一组今天的英语口语练习",
     );
 
-    const sessionConfig = await started;
-    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
-    expect(sessionConfig.initialPrompt).toContain("Group memory:");
-    expect(sessionConfig.initialPrompt).toContain("Topic context: 这个群主要用于英语学习");
-    expect(sessionConfig.initialPrompt).toContain(
+    const firstTurn = await firstSend;
+    expect(firstTurn.mode).toBe("prompt");
+    expect(firstTurn.text).toContain("Group memory policy:");
+    expect(firstTurn.text).toContain("Group memory:");
+    expect(firstTurn.text).toContain("Topic context: 这个群主要用于英语学习");
+    expect(firstTurn.text).toContain(
       "Custom correction_policy: 用户发英文时优先纠错再解释",
     );
-    expect(sessionConfig.initialPrompt).toContain("Current input:");
-    expect(sessionConfig.initialPrompt).toContain("请给我一组今天的英语口语练习");
+    expect(firstTurn.text).toContain("Current input:");
+    expect(firstTurn.text).toContain("请给我一组今天的英语口语练习");
   });
 
   test("scheduler reuses the same session-start path so due tasks also get memory", async () => {
@@ -424,11 +448,11 @@ describe("group memory prompt injection", () => {
       nextRun: "2020-01-01T00:00:00.000Z",
     });
 
-    const { provider, started } = createCapturingProvider();
+    const { runtime, firstSend } = createCapturingRuntime();
     const groupQueue = new GroupQueue(
       db,
       createFakeChannelManager(),
-      provider,
+      runtime,
       1,
     );
 
@@ -438,17 +462,18 @@ describe("group memory prompt injection", () => {
       groupQueue,
     );
 
-    const sessionConfig = await started;
-    expect(sessionConfig.initialPrompt).toContain("Group memory policy:");
-    expect(sessionConfig.initialPrompt).toContain("Group memory:");
-    expect(sessionConfig.initialPrompt).toContain("Custom study_goal: 重点提升英语口语");
-    expect(sessionConfig.initialPrompt).toContain("[Scheduled Task");
-    expect(sessionConfig.initialPrompt).toContain("请发送今日英语练习");
+    const firstTurn = await firstSend;
+    expect(firstTurn.mode).toBe("prompt");
+    expect(firstTurn.text).toContain("Group memory policy:");
+    expect(firstTurn.text).toContain("Group memory:");
+    expect(firstTurn.text).toContain("Custom study_goal: 重点提升英语口语");
+    expect(firstTurn.text).toContain("[Scheduled Task");
+    expect(firstTurn.text).toContain("请发送今日英语练习");
   });
 });
 
 describe("clear session concurrency protection", () => {
-  test("does not let a stale run overwrite the freshly cleared session id", async () => {
+  test("does not let a stale run overwrite the freshly cleared session ref", async () => {
     const { dir, db } = createWorkspace();
     cleanupDirs.push(dir);
     process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
@@ -458,25 +483,25 @@ describe("clear session concurrency protection", () => {
       releaseResult = resolve;
     });
 
-    const provider: AgentProvider = {
+    const runtime: AgentRuntime = {
       name: "mock",
-      startSession: async () => ({
-        session: {
-          push: () => {},
+      openConversation: async () => ({
+        conversation: {
+          send: async () => {},
           close: () => {},
         },
         events: (async function* () {
           await resultReleased;
-          yield { type: "result" as const, sessionId: "stale-session" };
+          yield { type: "completed" as const, sessionRef: "stale-session" };
         })(),
       }),
-      clearContext: async () => ({ sessionId: "fresh-session" }),
+      resetSession: async () => ({ sessionRef: "fresh-session" }),
     };
 
     const groupQueue = new GroupQueue(
       db,
       createFakeChannelManager(),
-      provider,
+      runtime,
       1,
     );
 
@@ -487,12 +512,12 @@ describe("clear session concurrency protection", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const clearResult = await groupQueue.clearSession("main");
-    expect(clearResult.sessionId).toBe("fresh-session");
-    expect(getSessionId(db, "main")).toBe("fresh-session");
+    expect(clearResult.sessionRef).toBe("fresh-session");
+    expect(getSessionRef(db, "main")).toBe("fresh-session");
 
     releaseResult();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(getSessionId(db, "main")).toBe("fresh-session");
+    expect(getSessionRef(db, "main")).toBe("fresh-session");
   });
 });

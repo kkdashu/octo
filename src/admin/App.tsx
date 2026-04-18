@@ -13,7 +13,7 @@ type SettingsDraft = {
   name: string;
   triggerPattern: string;
   requiresTrigger: boolean;
-  agentProvider: string;
+  profileKey: string;
 };
 
 type MemoryDraft = {
@@ -53,7 +53,7 @@ function createSettingsDraft(group: AdminGroupDto): SettingsDraft {
     name: group.name,
     triggerPattern: group.triggerPattern,
     requiresTrigger: group.requiresTrigger,
-    agentProvider: group.agentProvider,
+    profileKey: group.profileKey,
   };
 }
 
@@ -332,7 +332,7 @@ export function App() {
               <span className="group-name">{group.name}</span>
               <span className="group-meta">{group.folder}</span>
               <span className="group-meta">
-                {group.agentProvider}
+                {group.profileKey}
                 {group.isMain ? " · 主群" : ""}
               </span>
             </button>
@@ -403,12 +403,12 @@ export function App() {
                   </label>
 
                   <label className="field">
-                    <span>AI 引擎</span>
+                    <span>模型线路</span>
                     <select
-                      value={settingsDraft.agentProvider}
+                      value={settingsDraft.profileKey}
                       onChange={(event) =>
                         setSettingsDraft((current) => current
-                          ? { ...current, agentProvider: event.target.value }
+                          ? { ...current, profileKey: event.target.value }
                           : current)}
                     >
                       {profiles.map((profile) => (

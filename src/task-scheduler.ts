@@ -84,7 +84,10 @@ function pollAndExecute(
     if (task.context_mode === "group" && groupQueue.isActive(task.group_folder)) {
       // Reuse active session
       log.info(TAG, `Pushing scheduled task to active session: ${task.group_folder}`);
-      groupQueue.pushMessage(task.group_folder, prompt);
+      groupQueue.pushMessage(task.group_folder, {
+        mode: "follow_up",
+        text: prompt,
+      });
     } else {
       // Start new agent (or queue behind existing)
       log.info(TAG, `Enqueuing scheduled task as new agent run: ${task.group_folder}`);

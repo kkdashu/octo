@@ -6,37 +6,49 @@ export interface ExternalMcpServerSpec {
   env?: Record<string, string>;
 }
 
-// ---------------------------------------------------------------------------
-// Agent Provider abstraction — unified interface for different AI agent backends
-// ---------------------------------------------------------------------------
+export type RuntimeInputMode = "prompt" | "follow_up" | "steer";
 
-/** Normalized event stream from any agent backend */
-export type AgentEvent =
-  | { type: "text"; text: string }
-  | { type: "result"; sessionId?: string }
-  | { type: "error"; error: Error };
-
-/** A running agent session */
-export interface AgentSession {
-  /** Push a follow-up message into the active session */
-  push(text: string): void;
-  /** Close / terminate the session */
-  close(): void;
+export interface ConversationMessageInput {
+  text: string;
+  mode: RuntimeInputMode;
 }
 
-/** Configuration for starting a new agent session */
-export interface SessionConfig {
+export interface OpenConversationInput {
   groupFolder: string;
   workingDirectory: string;
-  initialPrompt: string;
   isMain: boolean;
-  resumeSessionId?: string;
   tools: ToolDefinition[];
   profile: ResolvedAgentProfile;
   externalMcpServers?: Record<string, ExternalMcpServerSpec>;
+  resumeSessionRef?: string;
 }
 
-/** Platform-agnostic tool definition */
+export interface ResetSessionInput {
+  groupFolder: string;
+  workingDirectory: string;
+  profile: ResolvedAgentProfile;
+  resumeSessionRef?: string;
+}
+
+export type ToolContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | {
+      type: "resource";
+      resource: {
+        uri: string;
+        text?: string;
+        blob?: string;
+        mimeType?: string;
+      };
+    }
+  | {
+      type: "resource_link";
+      name: string;
+      uri: string;
+      description?: string;
+    };
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -45,19 +57,41 @@ export interface ToolDefinition {
 }
 
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContentBlock[];
 }
 
-/** Agent provider — each backend implements this interface */
-export interface AgentProvider {
+export type RuntimeDiagnosticName =
+  | "turn_start"
+  | "turn_end"
+  | "auto_compaction_start"
+  | "auto_compaction_end"
+  | "auto_retry_start"
+  | "auto_retry_end";
+
+export type RuntimeEvent =
+  | { type: "assistant_text"; text: string }
+  | { type: "completed"; sessionRef?: string }
+  | { type: "failed"; error: Error }
+  | {
+      type: "diagnostic";
+      name: RuntimeDiagnosticName;
+      message?: string;
+    };
+
+export interface RuntimeConversation {
+  send(input: ConversationMessageInput): Promise<void>;
+  close(): void;
+}
+
+export interface AgentRuntime {
   readonly name: string;
 
-  startSession(config: SessionConfig): Promise<{
-    session: AgentSession;
-    events: AsyncIterable<AgentEvent>;
+  openConversation(input: OpenConversationInput): Promise<{
+    conversation: RuntimeConversation;
+    events: AsyncIterable<RuntimeEvent>;
   }>;
 
-  clearContext(config: SessionConfig): Promise<{
-    sessionId: string;
+  resetSession(input: ResetSessionInput): Promise<{
+    sessionRef: string;
   }>;
 }

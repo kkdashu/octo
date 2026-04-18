@@ -1,17 +1,21 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { listSessions } from "@anthropic-ai/claude-agent-sdk";
 import type { ChannelManager } from "./channels/manager";
-import { resolveAgentProfile } from "./runtime/profile-config";
+import { resolvePersistedPiSessionRef } from "./providers/pi-session-ref";
+import { loadAgentProfilesConfig, resolveAgentProfile } from "./runtime/profile-config";
 import { resolveEnabledExternalMcpServers } from "./runtime/external-mcp-config";
-import type { AgentProvider, AgentSession } from "./providers/types";
+import type {
+  AgentRuntime,
+  ConversationMessageInput,
+  RuntimeConversation,
+} from "./providers/types";
 import {
-  deleteSessionId,
+  deleteSessionRef,
   getGroupByFolder,
-  getSessionId,
+  getSessionRef,
   listGroupMemories,
-  saveSessionId,
+  saveSessionRef,
   type GroupMemoryRow,
 } from "./db";
 import { createGroupToolDefs } from "./tools";
@@ -99,32 +103,13 @@ export function buildSessionInitialPrompt(
   return sections.join("\n\n");
 }
 
-export async function resolveClaudeResumeSessionId(
-  workingDirectory: string,
-  persistedSessionId: string | null,
-  listDirSessions: typeof listSessions = listSessions,
-): Promise<string | undefined> {
-  if (!persistedSessionId) {
-    return undefined;
-  }
-
-  const sessions = await listDirSessions({
-    dir: workingDirectory,
-    includeWorktrees: false,
-  });
-
-  return sessions.some((session) => session.sessionId === persistedSessionId)
-    ? persistedSessionId
-    : undefined;
-}
-
 export function isGroupSkillInstalled(
   groupFolder: string,
   skillName: string,
   rootDir = process.cwd(),
 ): boolean {
   return existsSync(
-    resolve(rootDir, "groups", groupFolder, ".claude", "skills", skillName, "SKILL.md"),
+    resolve(rootDir, "groups", groupFolder, ".pi", "skills", skillName, "SKILL.md"),
   );
 }
 
@@ -141,24 +126,26 @@ export function buildGroupExternalMcpServers(
 
 export class GroupQueue {
   private locks: Map<string, Promise<void>> = new Map();
-  private activeSessions: Map<string, { session: AgentSession; generation: number }> =
-    new Map();
+  private activeConversations: Map<
+    string,
+    { conversation: RuntimeConversation; generation: number }
+  > = new Map();
   private sessionGenerations: Map<string, number> = new Map();
   private activeTasks = 0;
   private concurrencyLimit: number;
   private db: Database;
   private channelManager: ChannelManager;
-  private provider: AgentProvider;
+  private runtime: AgentRuntime;
 
   constructor(
     db: Database,
     channelManager: ChannelManager,
-    provider: AgentProvider,
+    runtime: AgentRuntime,
     concurrencyLimit = 3,
   ) {
     this.db = db;
     this.channelManager = channelManager;
-    this.provider = provider;
+    this.runtime = runtime;
     this.concurrencyLimit = concurrencyLimit;
     log.info(TAG, `GroupQueue initialized`, { concurrencyLimit });
   }
@@ -173,24 +160,27 @@ export class GroupQueue {
     return nextGeneration;
   }
 
-  /** Push a message to an active session, returns false if no active session */
-  pushMessage(groupFolder: string, text: string): boolean {
-    const activeSession = this.activeSessions.get(groupFolder);
-    if (activeSession) {
-      log.info(TAG, `Pushing follow-up message to active session: ${groupFolder}`, {
-        textLength: text.length,
-        textPreview: text.substring(0, 200),
+  /** Push a message to an active conversation, returns false if no active conversation */
+  pushMessage(groupFolder: string, input: ConversationMessageInput): boolean {
+    const activeConversation = this.activeConversations.get(groupFolder);
+    if (activeConversation) {
+      log.info(TAG, `Pushing message to active conversation: ${groupFolder}`, {
+        mode: input.mode,
+        textLength: input.text.length,
+        textPreview: input.text.substring(0, 200),
       });
-      activeSession.session.push(text);
+      void activeConversation.conversation.send(input).catch((error) => {
+        log.error(TAG, `Failed to push ${input.mode} message to ${groupFolder}`, error);
+      });
       return true;
     }
-    log.debug(TAG, `No active session for ${groupFolder}, cannot push`);
+    log.debug(TAG, `No active conversation for ${groupFolder}, cannot push`);
     return false;
   }
 
-  /** Check if a group has an active agent session */
+  /** Check if a group has an active agent conversation */
   isActive(groupFolder: string): boolean {
-    return this.activeSessions.has(groupFolder);
+    return this.activeConversations.has(groupFolder);
   }
 
   /** Enqueue a new agent task for a group (serial per-group, global concurrency limit) */
@@ -198,7 +188,7 @@ export class GroupQueue {
     log.info(TAG, `Enqueuing agent task for group: ${groupFolder}`, {
       activeTasks: this.activeTasks,
       concurrencyLimit: this.concurrencyLimit,
-      activeGroups: Array.from(this.activeSessions.keys()),
+      activeGroups: Array.from(this.activeConversations.keys()),
       promptLength: initialPrompt.length,
     });
 
@@ -210,11 +200,12 @@ export class GroupQueue {
     const task = (existing ?? Promise.resolve()).then(() =>
       this.runWithConcurrencyLimit(groupFolder, initialPrompt),
     );
-    this.locks.set(groupFolder, task.then(() => {}));
+    const lockPromise = task.then(() => {});
+    this.locks.set(groupFolder, lockPromise);
 
     // Clean up lock reference when done
     task.finally(() => {
-      if (this.locks.get(groupFolder) === task.then(() => {})) {
+      if (this.locks.get(groupFolder) === lockPromise) {
         this.locks.delete(groupFolder);
       }
     });
@@ -240,7 +231,8 @@ export class GroupQueue {
       if (!group) throw new Error(`Group not found: ${groupFolder}`);
 
       const isMain = group.is_main === 1;
-      const requestedProfileKey = group.agent_provider || "claude";
+      const requestedProfileKey =
+        group.profile_key || loadAgentProfilesConfig().defaultProfile;
       const profile = resolveAgentProfile(requestedProfileKey);
 
       log.info(TAG, `Using profile "${profile.profileKey}" for group ${groupFolder}`, {
@@ -259,28 +251,28 @@ export class GroupQueue {
         clearSession: (folder) => this.clearSession(folder),
       };
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
-      const persistedSessionId = getSessionId(this.db, groupFolder);
+      const persistedSessionRef = getSessionRef(this.db, groupFolder);
       const workingDirectory = resolve("groups", groupFolder);
-      const resumeSessionId = await resolveClaudeResumeSessionId(
+      const resumeSessionRef = resolvePersistedPiSessionRef(
         workingDirectory,
-        persistedSessionId,
+        persistedSessionRef,
       );
       const sessionGeneration = this.getSessionGeneration(groupFolder);
 
-      if (persistedSessionId && !resumeSessionId) {
-        deleteSessionId(this.db, groupFolder);
-        log.warn(TAG, `Discarded stale Claude session for ${groupFolder}`, {
-          persistedSessionId,
+      if (persistedSessionRef && !resumeSessionRef) {
+        deleteSessionRef(this.db, groupFolder);
+        log.warn(TAG, `Discarded stale Pi session ref for ${groupFolder}`, {
+          persistedSessionRef,
           workingDirectory,
         });
       }
 
       log.info(TAG, `Resolved session state for ${groupFolder}`, {
-        persistedSessionId,
-        resumeSessionId: resumeSessionId ?? null,
+        persistedSessionRef,
+        resumeSessionRef: resumeSessionRef ?? null,
         workingDirectory,
         sessionGeneration,
-        willResume: !!resumeSessionId,
+        willResume: !!resumeSessionRef,
       });
 
       const memories = listGroupMemories(this.db, groupFolder);
@@ -288,31 +280,30 @@ export class GroupQueue {
       const initialPromptWithMemory = buildSessionInitialPrompt(
         initialPrompt,
         memories,
-        !resumeSessionId,
+        !resumeSessionRef,
       );
 
       log.info(TAG, `Prepared session prompt for ${groupFolder}`, {
-        resumedSession: !!resumeSessionId,
+        resumedSession: !!resumeSessionRef,
         memoryCount: memories.length,
-        memoryPolicyInjected: !resumeSessionId,
-        memoryInjected: !!memoryBlock && !resumeSessionId,
+        memoryPolicyInjected: !resumeSessionRef,
+        memoryInjected: !!memoryBlock && !resumeSessionRef,
       });
 
-      const { session, events } = await this.provider.startSession({
+      const { conversation, events } = await this.runtime.openConversation({
         groupFolder,
         workingDirectory,
-        initialPrompt: initialPromptWithMemory,
         isMain,
-        resumeSessionId,
+        resumeSessionRef,
         tools,
         profile,
         externalMcpServers: buildGroupExternalMcpServers(groupFolder),
       });
 
       if (sessionGeneration !== this.getSessionGeneration(groupFolder)) {
-        session.close();
+        conversation.close();
         this.activeTasks--;
-        log.warn(TAG, `Discarding stale session startup for ${groupFolder} after generation changed`, {
+        log.warn(TAG, `Discarding stale conversation startup for ${groupFolder} after generation changed`, {
           groupFolder,
           sessionGeneration,
           currentGeneration: this.getSessionGeneration(groupFolder),
@@ -320,13 +311,13 @@ export class GroupQueue {
         return;
       }
 
-      this.activeSessions.set(groupFolder, {
-        session,
+      this.activeConversations.set(groupFolder, {
+        conversation,
         generation: sessionGeneration,
       });
-      log.info(TAG, `Agent started and session registered for ${groupFolder}`, {
+      log.info(TAG, `Agent started and conversation registered for ${groupFolder}`, {
         sessionGeneration,
-        resumeSessionId: resumeSessionId ?? null,
+        resumeSessionRef: resumeSessionRef ?? null,
       });
 
       // Process event stream asynchronously
@@ -337,14 +328,14 @@ export class GroupQueue {
               sessionGeneration === this.getSessionGeneration(groupFolder);
 
             if (!isCurrentGeneration) {
-              if (event.type === "result") {
-                log.warn(TAG, `Ignoring stale result for ${groupFolder}`, {
+              if (event.type === "completed") {
+                log.warn(TAG, `Ignoring stale completion for ${groupFolder}`, {
                   staleGeneration: sessionGeneration,
                   currentGeneration: this.getSessionGeneration(groupFolder),
-                  sessionId: event.sessionId,
+                  sessionRef: event.sessionRef,
                 });
-              } else if (event.type === "text") {
-                log.warn(TAG, `Ignoring stale text event for ${groupFolder}`, {
+              } else if (event.type === "assistant_text") {
+                log.warn(TAG, `Ignoring stale assistant text for ${groupFolder}`, {
                   staleGeneration: sessionGeneration,
                   currentGeneration: this.getSessionGeneration(groupFolder),
                   textPreview: event.text.substring(0, 120),
@@ -353,47 +344,61 @@ export class GroupQueue {
               continue;
             }
 
-            if (event.type === "text") {
+            if (event.type === "assistant_text") {
               log.info(TAG, `Sending agent reply to chat ${group.jid}`, {
                 groupFolder,
                 textPreview: event.text.substring(0, 200),
               });
               await this.channelManager.send(group.jid, event.text);
-            } else if (event.type === "result") {
-              log.info(TAG, `Received agent result for ${groupFolder}`, {
+            } else if (event.type === "completed") {
+              log.info(TAG, `Received agent completion for ${groupFolder}`, {
                 sessionGeneration,
-                sessionId: event.sessionId ?? null,
+                sessionRef: event.sessionRef ?? null,
               });
-              if (event.sessionId) {
-                const previousPersistedSessionId = getSessionId(this.db, groupFolder);
-                saveSessionId(this.db, groupFolder, event.sessionId);
-                log.info(TAG, `Session ID saved for group ${groupFolder}`, {
-                  previousPersistedSessionId,
-                  sessionId: event.sessionId,
+              if (event.sessionRef) {
+                const previousPersistedSessionRef = getSessionRef(this.db, groupFolder);
+                saveSessionRef(this.db, groupFolder, event.sessionRef);
+                log.info(TAG, `Session ref saved for group ${groupFolder}`, {
+                  previousPersistedSessionRef,
+                  sessionRef: event.sessionRef,
                   sessionGeneration,
                 });
               }
-              // Close the session after each turn to release the concurrency slot.
-              // The session ID is persisted above so it can be resumed on the next message.
-              session.close();
-              log.info(TAG, `Session closed after turn completion for ${groupFolder}`, {
+              // Close the conversation after each turn to release the concurrency slot.
+              // The session ref is persisted above so it can be resumed on the next message.
+              conversation.close();
+              log.info(TAG, `Conversation closed after turn completion for ${groupFolder}`, {
                 sessionGeneration,
               });
-            } else if (event.type === "error") {
+            } else if (event.type === "failed") {
               log.error(TAG, `Agent error for group ${groupFolder}`, event.error);
+              conversation.close();
+            } else if (event.type === "diagnostic") {
+              log.debug(TAG, `Runtime diagnostic for ${groupFolder}`, {
+                name: event.name,
+                message: event.message,
+                sessionGeneration,
+              });
             }
           }
         } catch (err) {
           log.error(TAG, `Event stream error for group ${groupFolder}`, err);
         } finally {
-          const activeSession = this.activeSessions.get(groupFolder);
-          if (activeSession?.generation === sessionGeneration) {
-            this.activeSessions.delete(groupFolder);
+          const activeConversation = this.activeConversations.get(groupFolder);
+          if (activeConversation?.generation === sessionGeneration) {
+            this.activeConversations.delete(groupFolder);
           }
           this.activeTasks--;
           log.debug(TAG, `Session ended for ${groupFolder}, active: ${this.activeTasks}/${this.concurrencyLimit}`);
         }
       })();
+
+      void conversation.send({
+        mode: "prompt",
+        text: initialPromptWithMemory,
+      }).catch((error) => {
+        log.error(TAG, `Initial prompt failed for ${groupFolder}`, error);
+      });
     } catch (err) {
       this.activeTasks--;
       log.error(TAG, `Failed to start agent for ${groupFolder}`, err);
@@ -402,11 +407,11 @@ export class GroupQueue {
 
   /** Remove an active session (e.g., when agent finishes) */
   removeSession(groupFolder: string) {
-    const activeSession = this.activeSessions.get(groupFolder);
-    if (activeSession) {
+    const activeConversation = this.activeConversations.get(groupFolder);
+    if (activeConversation) {
       log.info(TAG, `Removing active session for ${groupFolder}`);
-      activeSession.session.close();
-      this.activeSessions.delete(groupFolder);
+      activeConversation.conversation.close();
+      this.activeConversations.delete(groupFolder);
     }
   }
 
@@ -415,8 +420,8 @@ export class GroupQueue {
     groupFolder: string,
   ): Promise<{
     closedActiveSession: boolean;
-    previousSessionId: string | null;
-    sessionId: string;
+    previousSessionRef: string | null;
+    sessionRef: string;
     generation: number;
   }> {
     log.info(TAG, `Clearing session for group: ${groupFolder}`);
@@ -426,62 +431,60 @@ export class GroupQueue {
       throw new Error(`Group not found: ${groupFolder}`);
     }
 
-    const previousSessionId = getSessionId(this.db, groupFolder);
+    const previousSessionRef = getSessionRef(this.db, groupFolder);
     const generationBefore = this.getSessionGeneration(groupFolder);
     const generation = this.bumpSessionGeneration(groupFolder);
-    const closedActiveSession = this.activeSessions.has(groupFolder);
-    const activeSession = this.activeSessions.get(groupFolder);
-    const activeSessionGeneration = activeSession?.generation ?? null;
-    if (activeSession) {
+    const closedActiveSession = this.activeConversations.has(groupFolder);
+    const activeConversation = this.activeConversations.get(groupFolder);
+    const activeConversationGeneration = activeConversation?.generation ?? null;
+    if (activeConversation) {
       log.info(TAG, `Closing active session for ${groupFolder} before /clear session command`);
-      activeSession.session.close();
-      this.activeSessions.delete(groupFolder);
+      activeConversation.conversation.close();
+      this.activeConversations.delete(groupFolder);
     }
 
-    const requestedProfileKey = group.agent_provider || "claude";
+    const requestedProfileKey =
+      group.profile_key || loadAgentProfilesConfig().defaultProfile;
     const profile = resolveAgentProfile(requestedProfileKey);
     const workingDirectory = resolve("groups", groupFolder);
-    const persistedSessionId = previousSessionId;
-    const resumeSessionId = await resolveClaudeResumeSessionId(
+    const persistedSessionRef = previousSessionRef;
+    const resumeSessionRef = resolvePersistedPiSessionRef(
       workingDirectory,
-      persistedSessionId,
+      persistedSessionRef,
     );
 
     log.info(TAG, `Resolved session state before clear for ${groupFolder}`, {
-      previousSessionId,
-      persistedSessionId,
-      resumeSessionId: resumeSessionId ?? null,
+      previousSessionRef,
+      persistedSessionRef,
+      resumeSessionRef: resumeSessionRef ?? null,
       closedActiveSession,
-      activeSessionGeneration,
+      activeConversationGeneration,
       generationBefore,
       generationAfter: generation,
       workingDirectory,
       profileKey: profile.profileKey,
     });
 
-    if (persistedSessionId && !resumeSessionId) {
-      deleteSessionId(this.db, groupFolder);
-      log.warn(TAG, `Discarded stale Claude session before clear for ${groupFolder}`, {
-        persistedSessionId,
+    if (persistedSessionRef && !resumeSessionRef) {
+      deleteSessionRef(this.db, groupFolder);
+      log.warn(TAG, `Discarded stale Pi session ref before clear for ${groupFolder}`, {
+        persistedSessionRef,
         workingDirectory,
       });
     }
 
-    const { sessionId } = await this.provider.clearContext({
+    const { sessionRef } = await this.runtime.resetSession({
       groupFolder,
       workingDirectory,
-      initialPrompt: "/clear",
-      isMain: group.is_main === 1,
-      resumeSessionId,
-      tools: [],
       profile,
+      resumeSessionRef,
     });
 
-    saveSessionId(this.db, groupFolder, sessionId);
-    log.info(TAG, `Session cleared via Claude /clear command for ${groupFolder}`, {
-      previousSessionId,
-      sessionId,
-      resumeSessionId: resumeSessionId ?? null,
+    saveSessionRef(this.db, groupFolder, sessionRef);
+    log.info(TAG, `Session cleared via Pi local session reset for ${groupFolder}`, {
+      previousSessionRef,
+      sessionRef,
+      resumeSessionRef: resumeSessionRef ?? null,
       closedActiveSession,
       generationBefore,
       generationAfter: generation,
@@ -489,8 +492,8 @@ export class GroupQueue {
 
     return {
       closedActiveSession,
-      previousSessionId,
-      sessionId,
+      previousSessionRef,
+      sessionRef,
       generation,
     };
   }

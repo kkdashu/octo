@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDatabase, saveSessionId, updateGroupProvider } from "../src/db";
-import { resolveClaudeResumeSessionId } from "../src/group-queue";
+import { initDatabase, saveSessionRef, updateGroupProfile } from "../src/db";
+import { resolvePersistedPiSessionRef } from "../src/providers/pi-session-ref";
 import {
-  buildClaudeSdkEnv,
   listAgentProfiles,
   resolveAgentProfile,
 } from "../src/runtime/profile-config";
@@ -14,7 +13,6 @@ import {
   resolveMiniMaxTokenPlanMcpConfig,
 } from "../src/runtime/minimax-token-plan-mcp";
 import { anthropicToOpenAI, openAIToAnthropic } from "../src/runtime/openai-transform";
-import { __test__ as proxyTestHelpers } from "../src/runtime/openai-proxy";
 
 const originalEnv = { ...process.env };
 
@@ -71,6 +69,7 @@ function createTempProfilesConfig(): { dir: string; path: string } {
       2,
     ),
   );
+
   return { dir, path };
 }
 
@@ -116,7 +115,7 @@ describe("profile-config", () => {
     expect(() => resolveAgentProfile("codex")).toThrow("OPENAI_API_KEY");
   });
 
-  test("lists configured profiles and builds claude env", () => {
+  test("lists configured profiles", () => {
     const profiles = listAgentProfiles();
     expect(profiles.map((profile) => profile.profileKey)).toEqual([
       "claude",
@@ -125,11 +124,6 @@ describe("profile-config", () => {
       "kimi-cli",
       "minimax",
     ]);
-
-    const env = buildClaudeSdkEnv(resolveAgentProfile("claude"));
-    expect(env.ANTHROPIC_API_KEY).toBe("ant-key");
-    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
-    expect(env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-6");
   });
 
   test("resolves moonshot profile to anthropic compatibility endpoint", () => {
@@ -148,32 +142,6 @@ describe("profile-config", () => {
     expect(profile.upstreamApi).toBeUndefined();
     expect(profile.baseUrl).toBe("https://api.kimi.com/coding");
     expect(profile.codingPlanEnabled).toBe(true);
-
-    const env = buildClaudeSdkEnv(profile);
-    expect(env.ANTHROPIC_API_KEY).toBe("moonshot-key");
-    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.kimi.com/coding");
-    expect(env.ANTHROPIC_MODEL).toBe("kimi-k2.5");
-  });
-
-  test("lists moonshot profiles with resolved runtime endpoints", () => {
-    const profiles = listAgentProfiles();
-    expect(profiles).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          profileKey: "kimi",
-          apiFormat: "anthropic",
-          upstreamApi: undefined,
-          baseUrl: "https://api.moonshot.cn/anthropic",
-        }),
-        expect.objectContaining({
-          profileKey: "kimi-cli",
-          apiFormat: "anthropic",
-          upstreamApi: undefined,
-          baseUrl: "https://api.kimi.com/coding",
-          codingPlanEnabled: true,
-        }),
-      ]),
-    );
   });
 
   test("resolves minimax profile to anthropic compatibility endpoint", () => {
@@ -184,11 +152,6 @@ describe("profile-config", () => {
     expect(profile.baseUrl).toBe("https://api.minimaxi.com/anthropic");
     expect(profile.apiKey).toBe("minimax-key");
     expect(profile.model).toBe("MiniMax-M2.7");
-
-    const env = buildClaudeSdkEnv(profile);
-    expect(env.ANTHROPIC_API_KEY).toBe("minimax-key");
-    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.minimaxi.com/anthropic");
-    expect(env.ANTHROPIC_MODEL).toBe("MiniMax-M2.7");
   });
 });
 
@@ -283,142 +246,62 @@ describe("openai compatibility transforms", () => {
       },
     ]);
   });
-
-  test("converts chat completions request into responses request for openai upstream", () => {
-    const request = proxyTestHelpers.convertChatCompletionsRequestToResponsesRequest({
-      model: "gpt-5.4",
-      stream: true,
-      messages: [
-        { role: "system", content: "Follow the rules" },
-        { role: "user", content: "hello" },
-      ],
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "send_message",
-            description: "Send a message",
-            parameters: {
-              type: "object",
-              properties: { text: { type: "string" } },
-              required: ["text"],
-            },
-          },
-        },
-      ],
-    });
-
-    expect(request.instructions).toBe("Follow the rules");
-    expect(request.input).toEqual([
-      {
-        role: "user",
-        content: [{ type: "input_text", text: "hello" }],
-      },
-    ]);
-    expect(request.tools).toEqual([
-      {
-        type: "function",
-        name: "send_message",
-        description: "Send a message",
-        parameters: {
-          type: "object",
-          properties: { text: { type: "string" } },
-          required: ["text"],
-        },
-      },
-    ]);
-  });
-
-  test("converts responses api output into openai chat response shape", () => {
-    const response = proxyTestHelpers.convertResponsesToOpenAIResponse({
-      id: "resp_1",
-      model: "gpt-5.4",
-      output: [
-        {
-          type: "message",
-          content: [{ type: "output_text", text: "hello" }],
-        },
-        {
-          type: "function_call",
-          call_id: "call_1",
-          name: "send_message",
-          arguments: "{\"text\":\"hi\"}",
-        },
-      ],
-      usage: {
-        input_tokens: 3,
-        output_tokens: 5,
-      },
-    });
-
-    expect(response.choices).toEqual([
-      {
-        message: {
-          role: "assistant",
-          content: "hello",
-          tool_calls: [
-            {
-              id: "call_1",
-              type: "function",
-              function: {
-                name: "send_message",
-                arguments: "{\"text\":\"hi\"}",
-              },
-            },
-          ],
-        },
-        finish_reason: "tool_calls",
-      },
-    ]);
-  });
 });
 
 describe("db session retention on profile switch", () => {
-  test("updateGroupProvider keeps existing session rows", () => {
+  test("updateGroupProfile keeps existing session rows", () => {
     const db = initDatabase(":memory:");
     db.query(
       `INSERT INTO registered_groups (
-        jid, name, folder, channel_type, trigger_pattern, added_at, requires_trigger, is_main, agent_provider
+        jid, name, folder, channel_type, trigger_pattern, added_at, requires_trigger, is_main, profile_key
       ) VALUES ('jid-1', 'Test', 'group-1', 'feishu', '', '2026-03-24T00:00:00.000Z', 1, 0, 'claude')`,
     ).run();
 
-    saveSessionId(db, "group-1", "session-1");
-    updateGroupProvider(db, "group-1", "codex");
+    saveSessionRef(db, "group-1", "session-1");
+    updateGroupProfile(db, "group-1", "codex");
 
     const row = db
-      .query("SELECT session_id FROM sessions WHERE group_folder = 'group-1'")
-      .get() as { session_id: string } | null;
+      .query("SELECT session_ref FROM sessions WHERE group_folder = 'group-1'")
+      .get() as { session_ref: string } | null;
 
-    expect(row?.session_id).toBe("session-1");
+    expect(row?.session_ref).toBe("session-1");
   });
 });
 
-describe("claude session resume validation", () => {
-  test("keeps persisted session id when it exists in Claude session storage", async () => {
-    const resumeSessionId = await resolveClaudeResumeSessionId(
-      "/tmp/group-1",
-      "session-1",
-      async () => [
-        {
-          sessionId: "session-1",
-          summary: "latest",
-          lastModified: Date.now(),
-          fileSize: 1,
-        },
-      ],
-    );
+describe("pi session ref validation", () => {
+  test("keeps persisted session ref when the local session file exists", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-runtime-pi-session-"));
+    const workingDirectory = join(workspaceDir, "groups", "group-1");
+    const relativeSessionRef = join(".pi", "sessions", "session-1.jsonl");
 
-    expect(resumeSessionId).toBe("session-1");
+    try {
+      mkdirSync(join(workingDirectory, ".pi", "sessions"), { recursive: true });
+      writeFileSync(join(workingDirectory, relativeSessionRef), "");
+
+      expect(
+        resolvePersistedPiSessionRef(workingDirectory, relativeSessionRef),
+      ).toBe(join(workingDirectory, relativeSessionRef));
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 
-  test("drops persisted session id when it no longer exists in Claude session storage", async () => {
-    const resumeSessionId = await resolveClaudeResumeSessionId(
-      "/tmp/group-1",
-      "legacy-session",
-      async () => [],
-    );
+  test("drops persisted session ref when the local session file is missing", () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "octo-runtime-pi-session-"));
+    const workingDirectory = join(workspaceDir, "groups", "group-1");
 
-    expect(resumeSessionId).toBeUndefined();
+    try {
+      mkdirSync(workingDirectory, { recursive: true });
+
+      expect(
+        resolvePersistedPiSessionRef(
+          workingDirectory,
+          join(".pi", "sessions", "legacy-session.jsonl"),
+        ),
+      ).toBeUndefined();
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 
