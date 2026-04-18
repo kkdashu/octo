@@ -44,8 +44,12 @@ store/logs/
 # Runtime-generated group directories (keep templates only)
 groups/feishu_*/
 groups/main/.claude/
+groups/main/.pi
 groups/main/CLAUDE.md
 .generated
 media
 config/external-mcp.example.json
 wiki-workspace
+
+LobsterAI-main
+pi-mono
