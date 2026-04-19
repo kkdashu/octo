@@ -46,6 +46,10 @@ type ActiveGroupSession = {
   generation: number;
   unsubscribe: () => void;
   reportedRuntimeFailures: Set<string>;
+  pendingInitialInputs: ConversationMessageInput[];
+  initialInputPending: boolean;
+  initialInputFlush: Promise<void> | null;
+  closed: boolean;
 };
 
 type CreateGroupSessionHostResult = {
@@ -180,6 +184,11 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       return false;
     }
 
+    if (activeSession.initialInputPending) {
+      activeSession.pendingInitialInputs.push(input);
+      return true;
+    }
+
     void this.sendInput(activeSession, input).catch((error) => {
       log.error(TAG, `Failed to push ${input.mode} message to ${groupFolder}`, error);
       void this.reportRuntimeFailure(activeSession, error);
@@ -225,6 +234,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     const closedActiveSession = !!activeSession;
 
     if (activeSession) {
+      activeSession.closed = true;
       this.activeSessions.delete(groupFolder);
       try {
         await activeSession.host.session.abort();
@@ -312,6 +322,10 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         generation: sessionGeneration,
         unsubscribe: () => {},
         reportedRuntimeFailures: new Set(),
+        pendingInitialInputs: [],
+        initialInputPending: true,
+        initialInputFlush: null,
+        closed: false,
       };
       const unsubscribe = created.host.session.subscribe((event: SessionEvent) => {
         this.handleSessionEvent(activeSession!, event);
@@ -322,7 +336,14 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       await this.sendInput(activeSession, {
         mode: "prompt",
         text: initialPrompt,
+      }, {
+        onPromptDispatched: () => {
+          if (activeSession?.host.session.isStreaming) {
+            void this.releasePendingInitialInputs(activeSession);
+          }
+        },
       });
+      await this.releasePendingInitialInputs(activeSession, { wait: true });
       await this.waitForOutboundDrain(groupFolder);
 
       if (sessionGeneration === this.getSessionGeneration(groupFolder)) {
@@ -347,6 +368,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         this.activeSessions.delete(groupFolder);
       }
       if (activeSession) {
+        activeSession.closed = true;
         activeSession.unsubscribe();
         await activeSession.host.dispose().catch((error) => {
           log.warn(TAG, `Failed to dispose group runtime for ${groupFolder}`, {
@@ -366,6 +388,9 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
   private async sendInput(
     activeSession: ActiveGroupSession,
     input: ConversationMessageInput,
+    options?: {
+      onPromptDispatched?(): void;
+    },
   ): Promise<void> {
     const normalizedPrompt = await this.preparePrompt(
       activeSession.group.folder,
@@ -379,7 +404,9 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         );
       }
 
-      await activeSession.host.session.prompt(normalizedPrompt);
+      const promptTask = activeSession.host.session.prompt(normalizedPrompt);
+      options?.onPromptDispatched?.();
+      await promptTask;
       return;
     }
 
@@ -389,7 +416,9 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         return;
       }
 
-      await activeSession.host.session.prompt(normalizedPrompt);
+      const promptTask = activeSession.host.session.prompt(normalizedPrompt);
+      options?.onPromptDispatched?.();
+      await promptTask;
       return;
     }
 
@@ -398,7 +427,9 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       return;
     }
 
-    await activeSession.host.session.prompt(normalizedPrompt);
+    const promptTask = activeSession.host.session.prompt(normalizedPrompt);
+    options?.onPromptDispatched?.();
+    await promptTask;
   }
 
   private handleSessionEvent(
@@ -435,6 +466,10 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       || event.type === "auto_retry_start"
       || event.type === "auto_retry_end"
     ) {
+      if (event.type === "turn_start") {
+        void this.releasePendingInitialInputs(activeSession);
+      }
+
       log.debug(TAG, `Pi diagnostic for ${activeSession.group.folder}`, {
         type: event.type,
         sessionGeneration: activeSession.generation,
@@ -482,6 +517,64 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
 
   private async waitForOutboundDrain(groupFolder: string): Promise<void> {
     await this.outboundLocks.get(groupFolder);
+  }
+
+  private releasePendingInitialInputs(
+    activeSession: ActiveGroupSession,
+    options?: { wait?: boolean },
+  ): Promise<void> {
+    if (activeSession.closed) {
+      return Promise.resolve();
+    }
+
+    if (activeSession.initialInputPending) {
+      activeSession.initialInputPending = false;
+    }
+
+    const flushPromise = this.flushPendingInitialInputs(activeSession);
+    if (options?.wait) {
+      return flushPromise;
+    }
+
+    return Promise.resolve();
+  }
+
+  private flushPendingInitialInputs(activeSession: ActiveGroupSession): Promise<void> {
+    if (activeSession.closed) {
+      return Promise.resolve();
+    }
+
+    const existingFlush = activeSession.initialInputFlush;
+    if (existingFlush) {
+      return existingFlush;
+    }
+
+    const flushPromise = (async () => {
+      while (!activeSession.closed && activeSession.pendingInitialInputs.length > 0) {
+        const nextInput = activeSession.pendingInitialInputs.shift();
+        if (!nextInput) {
+          continue;
+        }
+
+        try {
+          await this.sendInput(activeSession, nextInput);
+        } catch (error) {
+          log.error(
+            TAG,
+            `Failed to flush queued ${nextInput.mode} message to ${activeSession.group.folder}`,
+            error,
+          );
+          await this.reportRuntimeFailure(activeSession, error);
+        }
+      }
+    })().finally(() => {
+      if (activeSession.initialInputFlush === flushPromise) {
+        activeSession.initialInputFlush = null;
+      }
+    });
+
+    activeSession.initialInputFlush = flushPromise;
+    return flushPromise;
   }
 
   private async waitForConcurrencySlot(groupFolder: string): Promise<void> {

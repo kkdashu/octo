@@ -99,6 +99,9 @@ function createDeferredSessionHost(label: string): {
         calls.push({ mode: "prompt", text });
         promptText = text;
         streaming = true;
+        listener?.({
+          type: "turn_start",
+        });
 
         await new Promise<void>((resolve) => {
           resolvePrompt = resolve;
@@ -116,6 +119,9 @@ function createDeferredSessionHost(label: string): {
                 },
               });
             }
+            listener?.({
+              type: "turn_end",
+            });
             resolvePrompt = null;
             resolve();
           };
@@ -170,6 +176,9 @@ function createDeferredSessionHost(label: string): {
             stopReason: "error",
             errorMessage,
           },
+        });
+        listener?.({
+          type: "turn_end",
         });
         resolvePrompt?.();
         resolvePrompt = null;
@@ -375,6 +384,74 @@ describe("FeishuGroupAdapter", () => {
           chatJid: "oc_main",
           text: "AI 运行失败: 401 invalid api key",
         },
+      ]);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  test("queues follow-up messages until the initial prompt has been dispatched", async () => {
+    const workspace = createWorkspace();
+    const sent: Array<{ chatJid: string; text: string }> = [];
+    const createdHosts: ReturnType<typeof createDeferredSessionHost>[] = [];
+    let releaseInitialPreparation = () => {};
+
+    try {
+      const initialPreparation = new Promise<void>((resolve) => {
+        releaseInitialPreparation = resolve;
+      });
+
+      const adapter = new FeishuGroupAdapter({
+        db: workspace.db,
+        channelManager: createFakeChannelManager(sent),
+        imageMessagePreprocessor: createPassthroughImagePreprocessor(),
+        preparePrompt: async (_groupFolder, text) => {
+          if (text === "slow-image") {
+            await initialPreparation;
+          }
+          return `prepared:${text}`;
+        },
+        createGroupSessionHost: async (groupFolder) => {
+          const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
+          createdHosts.push(fake);
+          return {
+            host: fake.host,
+            group: getGroupByFolder(workspace.db, groupFolder)!,
+            sessionRef: fake.host.session.sessionFile!,
+          };
+        },
+        resetGroupSession: async () => "fresh-session.jsonl",
+      });
+
+      const turn = adapter.enqueue("main", "slow-image");
+      await flushMicrotasks();
+
+      expect(adapter.isActive("main")).toBe(true);
+      expect(adapter.pushMessage("main", {
+        mode: "follow_up",
+        text: "next",
+      })).toBe(true);
+      await flushMicrotasks();
+
+      expect(createdHosts).toHaveLength(1);
+      expect(createdHosts[0]?.calls).toEqual([]);
+
+      releaseInitialPreparation();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(createdHosts[0]?.calls).toEqual([
+        { mode: "prompt", text: "prepared:slow-image" },
+        { mode: "follow_up", text: "prepared:next" },
+      ]);
+
+      createdHosts[0]!.release();
+      await turn;
+      await flushMicrotasks();
+
+      expect(sent).toEqual([
+        { chatJid: "oc_main", text: "reply:prepared:slow-image" },
+        { chatJid: "oc_main", text: "reply:prepared:next" },
       ]);
     } finally {
       workspace.cleanup();
