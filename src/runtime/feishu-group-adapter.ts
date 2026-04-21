@@ -1,9 +1,13 @@
 import type { Database } from "bun:sqlite";
 import {
   appendRunEvent,
+  createTurnRequest,
   createRun,
   getChatById,
+  getTurnRequestById,
   listChatBindingsForChat,
+  type TurnRequestRow,
+  updateTurnRequest,
   updateChat,
   updateRun,
   upsertWorkspaceRuntimeState,
@@ -56,6 +60,7 @@ type ActiveChatSession = {
   host: PiGroupSessionHost;
   workspace: WorkspaceRow;
   chat: ChatRow;
+  turnRequestId: string;
   generation: number;
   unsubscribe: () => void;
   pendingInitialInputs: ConversationMessageInput[];
@@ -240,9 +245,27 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
 
   async enqueue(chatId: string, initialPrompt: string): Promise<EnqueueRuntimeResult> {
     const chat = this.resolveChat(chatId);
+    const turnRequest = createTurnRequest(this.options.db, {
+      workspaceId: chat.workspace_id,
+      chatId: chat.id,
+      sourceType: "system",
+      inputMode: "prompt",
+      requestText: initialPrompt,
+    });
+
+    return this.executeTurnRequest(turnRequest.id);
+  }
+
+  async executeTurnRequest(turnRequestId: string): Promise<EnqueueRuntimeResult> {
+    const turnRequest = getTurnRequestById(this.options.db, turnRequestId);
+    if (!turnRequest) {
+      throw new Error(`Turn request not found: ${turnRequestId}`);
+    }
+
+    const chat = this.resolveChat(turnRequest.chat_id);
     const existing = this.locks.get(chat.workspace_id);
     const task = (existing ?? Promise.resolve()).then(() =>
-      this.runTurn(chat.id, initialPrompt),
+      this.runTurnRequest(turnRequest),
     );
     const lockPromise = task.then(
       () => undefined,
@@ -347,11 +370,10 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     };
   }
 
-  private async runTurn(
-    chatId: string,
-    initialPrompt: string,
+  private async runTurnRequest(
+    turnRequest: TurnRequestRow,
   ): Promise<EnqueueRuntimeResult> {
-    const initialChat = this.resolveChat(chatId);
+    const initialChat = this.resolveChat(turnRequest.chat_id);
     const initialWorkspace = this.getWorkspaceForChat(initialChat);
     await this.waitForConcurrencySlot(initialWorkspace.id);
     this.activeTasks += 1;
@@ -360,28 +382,43 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     let activeSession: ActiveChatSession | null = null;
 
     try {
+      const startedAt = new Date().toISOString();
+      updateTurnRequest(this.options.db, turnRequest.id, {
+        status: "running",
+        startedAt,
+        completedAt: null,
+        error: null,
+      });
       const created = await this.createChatSessionHost(initialChat.id);
       if (sessionGeneration !== this.getSessionGeneration(created.chat.id)) {
         await created.host.dispose();
-        return;
+        updateTurnRequest(this.options.db, turnRequest.id, {
+          status: "cancelled",
+          completedAt: new Date().toISOString(),
+        });
+        return {
+          status: "failed",
+          failureMessage: "Turn request cancelled by session reset.",
+          failureNotified: false,
+        };
       }
 
       this.ensureWorkspaceOnChatBranch(created.workspace, created.chat);
-      const now = new Date().toISOString();
       const run = createRun(this.options.db, {
+        turnRequestId: turnRequest.id,
         workspaceId: created.workspace.id,
         chatId: created.chat.id,
         status: "running",
         branch: created.chat.active_branch,
-        triggerSource: "router",
-        startedAt: now,
+        triggerSource: turnRequest.source_type,
+        startedAt,
       });
       upsertWorkspaceRuntimeState(this.options.db, {
         workspaceId: created.workspace.id,
         checkedOutBranch: created.chat.active_branch,
         activeRunId: run.id,
         status: "running",
-        lastActivityAt: now,
+        lastActivityAt: startedAt,
         unloadAfter: null,
       });
       appendRunEvent(this.options.db, {
@@ -389,15 +426,17 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         chatId: created.chat.id,
         eventType: "run_started",
         payload: JSON.stringify({
+          triggerSource: turnRequest.source_type,
           branch: created.chat.active_branch,
         }),
-        createdAt: now,
+        createdAt: startedAt,
       });
 
       activeSession = {
         host: created.host,
         workspace: created.workspace,
         chat: created.chat,
+        turnRequestId: turnRequest.id,
         generation: sessionGeneration,
         unsubscribe: () => undefined,
         pendingInitialInputs: [],
@@ -417,8 +456,8 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       this.activeSessions.set(created.workspace.id, activeSession);
 
       await this.sendInput(activeSession, {
-        mode: "prompt",
-        text: initialPrompt,
+        mode: turnRequest.input_mode,
+        text: turnRequest.request_text,
       }, {
         onPromptDispatched: () => {
           if (activeSession?.host.session.isStreaming) {
@@ -464,6 +503,11 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
           failureNotified,
         };
       }
+      updateTurnRequest(this.options.db, turnRequest.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        error: toError(error).message,
+      });
       return {
         status: "failed",
         failureMessage: toError(error).message,
@@ -477,10 +521,11 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         this.activeSessions.delete(activeSession.workspace.id);
       }
       if (activeSession) {
+        const disposedChatId = activeSession.chat.id;
         activeSession.closed = true;
         activeSession.unsubscribe();
         await activeSession.host.dispose().catch((error) => {
-          log.warn(TAG, `Failed to dispose runtime for ${activeSession.chat.id}`, {
+          log.warn(TAG, `Failed to dispose runtime for ${disposedChatId}`, {
             error: error instanceof Error ? error.message : String(error),
           });
         });
@@ -689,7 +734,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         try {
           await this.sendInput(activeSession, nextInput);
         } catch (error) {
-          await this.reportRuntimeFailure(activeSession, error);
+          await this.notifyRuntimeFailure(activeSession, error);
         }
       }
     })().finally(() => {
@@ -735,6 +780,11 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     error?: string,
   ): void {
     const now = new Date().toISOString();
+    updateTurnRequest(this.options.db, activeSession.turnRequestId, {
+      status,
+      completedAt: now,
+      error: error ?? null,
+    });
     updateRun(this.options.db, activeSession.runId, {
       status,
       endedAt: now,

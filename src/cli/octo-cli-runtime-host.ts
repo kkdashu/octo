@@ -6,6 +6,7 @@ import type {
   AgentSessionRuntimeDiagnostic,
   CreateAgentSessionRuntimeFactory,
 } from "@mariozechner/pi-coding-agent";
+import type { ConversationMessageInput } from "../providers/types";
 import type { ChatRow, WorkspaceRow } from "../db";
 import { log } from "../logger";
 import { CliStateStore } from "./state-store";
@@ -38,6 +39,7 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
   private currentWorkspace: WorkspaceRow;
   private currentChat: ChatRow;
   private currentRuntime: AgentSessionRuntime;
+  private readonly sessionProxy: AgentSessionRuntime["session"];
   private externalSwitchHandler:
     | ((event: OctoCliRuntimeSwitchEvent) => Promise<void> | void)
     | null = null;
@@ -53,6 +55,55 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     this.currentWorkspace = options.currentWorkspace;
     this.currentChat = options.currentChat;
     this.currentRuntime = options.runtime;
+    this.sessionProxy = new Proxy({} as AgentSessionRuntime["session"], {
+      get: (_target, property, receiver) => {
+        const currentSession = this.currentRuntime.session as Record<PropertyKey, unknown>;
+
+        if (property === "prompt") {
+          return async (text: string, promptOptions?: { streamingBehavior?: string }) => {
+            const streamingBehavior = promptOptions?.streamingBehavior;
+            let mode: ConversationMessageInput["mode"] = "prompt";
+            if (streamingBehavior === "followUp") {
+              mode = "follow_up";
+            } else if (streamingBehavior === "steer") {
+              mode = "steer";
+            }
+
+            await this.options.manager.prompt(this.currentChat.id, {
+              text,
+              mode,
+            }, {
+              sourceType: "cli",
+            });
+          };
+        }
+
+        if (property === "followUp") {
+          return async (text: string) => {
+            await this.options.manager.prompt(this.currentChat.id, {
+              text,
+              mode: "follow_up",
+            }, {
+              sourceType: "cli",
+            });
+          };
+        }
+
+        if (property === "steer") {
+          return async (text: string) => {
+            await this.options.manager.prompt(this.currentChat.id, {
+              text,
+              mode: "steer",
+            }, {
+              sourceType: "cli",
+            });
+          };
+        }
+
+        const value = Reflect.get(currentSession, property, receiver);
+        return typeof value === "function" ? value.bind(currentSession) : value;
+      },
+    });
     this.syncStateStore();
   }
 
@@ -61,7 +112,7 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
   }
 
   override get session() {
-    return this.currentRuntime.session;
+    return this.sessionProxy;
   }
 
   override get cwd(): string {

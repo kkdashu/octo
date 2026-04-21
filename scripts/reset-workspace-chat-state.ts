@@ -5,7 +5,10 @@ import { basename, resolve, sep } from "node:path";
 const TABLES_TO_CLEAR = [
   "run_events",
   "runs",
+  "turn_requests",
   "workspace_runtime_state",
+  "inbound_dispatcher_cursors",
+  "inbound_messages",
   "chat_bindings",
   "chats",
   "workspace_bindings",

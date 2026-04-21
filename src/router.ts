@@ -1,12 +1,13 @@
 import type { Database } from "bun:sqlite";
 import type { ChannelManager } from "./channels/manager";
 import {
-  getRouterState,
-  getUnprocessedMessages,
+  createTurnRequest,
+  getInboundDispatcherCursor,
   listChatBindingsForChat,
-  setRouterState,
+  listPendingInboundMessagesForChat,
   type ChatRow,
-  type MessageRow,
+  type InboundMessageRow,
+  upsertInboundDispatcherCursor,
 } from "./db";
 import { log } from "./logger";
 import type {
@@ -16,10 +17,11 @@ import type {
 import { WorkspaceService } from "./workspace-service";
 
 const TAG = "router";
+const DEFAULT_INBOUND_DISPATCHER = "default_inbound_dispatcher";
 
 export function shouldTrigger(
   chat: ChatRow,
-  message: MessageRow,
+  message: InboundMessageRow,
 ): boolean {
   if (!chat.requires_trigger) {
     return true;
@@ -31,7 +33,7 @@ export function shouldTrigger(
 
   if (
     chat.trigger_pattern
-    && message.content.includes(chat.trigger_pattern)
+    && message.content_text.includes(chat.trigger_pattern)
   ) {
     return true;
   }
@@ -39,17 +41,17 @@ export function shouldTrigger(
   return false;
 }
 
-export function formatMessagesAsPrompt(messages: MessageRow[]): string {
+export function formatMessagesAsPrompt(messages: InboundMessageRow[]): string {
   return messages
     .map(
       (message) =>
-        `[${message.timestamp}] ${message.sender_name || message.sender}: ${message.content}`,
+        `[${message.message_timestamp}] ${message.sender_name || message.sender_id}: ${message.content_text}`,
     )
     .join("\n");
 }
 
-export function isClearSessionCommand(message: MessageRow): boolean {
-  return message.content.trim() === "/clear";
+export function isClearSessionCommand(message: InboundMessageRow): boolean {
+  return message.content_text.trim() === "/clear";
 }
 
 function buildClearSessionSystemReply(): string {
@@ -100,14 +102,15 @@ async function processMessages(
         continue;
       }
 
-      const cursorKey = `last_timestamp:${chat.id}`;
-      const legacyCursorKey = `last_timestamp:${binding.external_chat_id}`;
-      const lastTimestamp = getRouterState(db, cursorKey)
-        ?? getRouterState(db, legacyCursorKey)
-        ?? "1970-01-01T00:00:00.000Z";
-      const messages = getUnprocessedMessages(
+      const cursor = getInboundDispatcherCursor(
         db,
-        binding.external_chat_id,
+        DEFAULT_INBOUND_DISPATCHER,
+        chat.id,
+      );
+      const lastTimestamp = cursor?.last_message_timestamp ?? "1970-01-01T00:00:00.000Z";
+      const messages = listPendingInboundMessagesForChat(
+        db,
+        chat.id,
         lastTimestamp,
       );
       if (messages.length === 0) {
@@ -130,8 +133,12 @@ async function processMessages(
             );
           });
 
-        setRouterState(db, cursorKey, lastMessage.timestamp);
-        setRouterState(db, legacyCursorKey, lastMessage.timestamp);
+        upsertInboundDispatcherCursor(db, {
+          consumer: DEFAULT_INBOUND_DISPATCHER,
+          chatId: chat.id,
+          lastInboundMessageId: lastMessage.id,
+          lastMessageTimestamp: lastMessage.message_timestamp,
+        });
         continue;
       }
 
@@ -141,27 +148,30 @@ async function processMessages(
       }
 
       const prompt = formatMessagesAsPrompt(messages);
-      if (groupQueue.isActive(chat.id)) {
-        const accepted = groupQueue.pushMessage(chat.id, {
-          mode: "follow_up",
-          text: prompt,
-        });
-        if (!accepted) {
-          const result = await groupQueue.enqueue(chat.id, prompt);
-          if (!shouldAdvanceCursor(result)) {
-            continue;
-          }
-        }
-      } else {
-        const result = await groupQueue.enqueue(chat.id, prompt);
-        if (!shouldAdvanceCursor(result)) {
-          continue;
-        }
+      const turnRequest = createTurnRequest(db, {
+        workspaceId: workspace.id,
+        chatId: chat.id,
+        sourceType: "channel_inbound",
+        sourceRef: JSON.stringify({
+          inboundMessageIds: messages.map((message) => message.id),
+          platform: binding.platform,
+          externalChatId: binding.external_chat_id,
+        }),
+        inputMode: groupQueue.isActive(chat.id) ? "follow_up" : "prompt",
+        requestText: prompt,
+      });
+      const result = await groupQueue.executeTurnRequest(turnRequest.id);
+      if (!shouldAdvanceCursor(result)) {
+        continue;
       }
 
       const lastProcessed = messages[messages.length - 1]!;
-      setRouterState(db, cursorKey, lastProcessed.timestamp);
-      setRouterState(db, legacyCursorKey, lastProcessed.timestamp);
+      upsertInboundDispatcherCursor(db, {
+        consumer: DEFAULT_INBOUND_DISPATCHER,
+        chatId: chat.id,
+        lastInboundMessageId: lastProcessed.id,
+        lastMessageTimestamp: lastProcessed.message_timestamp,
+      });
     }
   }
 }

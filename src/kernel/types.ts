@@ -162,6 +162,10 @@ export interface RuntimeSnapshotController {
   prompt(
     chatId: string,
     input: ConversationMessageInput,
+    options?: {
+      sourceType?: "cli" | "desktop" | "system";
+      sourceRef?: string;
+    },
   ): Promise<RuntimeSnapshot>;
   abort(chatId: string): Promise<RuntimeSnapshot>;
   newSession(chatId: string): Promise<RuntimeSnapshot>;

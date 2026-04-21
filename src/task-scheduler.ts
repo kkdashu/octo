@@ -1,7 +1,7 @@
 import { CronExpressionParser } from "cron-parser";
 import type { Database } from "bun:sqlite";
 import type { ChannelManager } from "./channels/manager";
-import { getDueTasks, updateTaskAfterRun } from "./db";
+import { createTurnRequest, getDueTasks, updateTaskAfterRun } from "./db";
 import { log } from "./logger";
 import type { GroupRuntimeController } from "./runtime/group-runtime-controller";
 
@@ -81,16 +81,22 @@ function pollAndExecute(
 
     const prompt = `[Scheduled Task ${task.id}]\n${task.prompt}`;
 
-    if (task.context_mode === "workspace" && groupQueue.isActive(task.chat_id)) {
-      log.info(TAG, `Pushing scheduled task to active session: ${task.chat_id}`);
-      groupQueue.pushMessage(task.chat_id, {
-        mode: "follow_up",
-        text: prompt,
-      });
-    } else {
-      log.info(TAG, `Enqueuing scheduled task as new agent run: ${task.chat_id}`);
-      groupQueue.enqueue(task.chat_id, prompt);
-    }
+    const turnRequest = createTurnRequest(db, {
+      workspaceId: task.workspace_id,
+      chatId: task.chat_id,
+      sourceType: "scheduled_task",
+      sourceRef: task.id,
+      inputMode:
+        task.context_mode === "workspace" && groupQueue.isActive(task.chat_id)
+          ? "follow_up"
+          : "prompt",
+      requestText: prompt,
+    });
+    log.info(TAG, `Executing scheduled task turn request ${turnRequest.id}`, {
+      chatId: task.chat_id,
+      taskId: task.id,
+    });
+    void groupQueue.executeTurnRequest(turnRequest.id);
   }
 }
 

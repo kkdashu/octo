@@ -328,6 +328,8 @@ export function createDesktopApiRouter(
         const snapshot = await manager.prompt(chatId, {
           text: body.text,
           mode: body.mode ?? "prompt",
+        }, {
+          sourceType: "desktop",
         });
         return json(snapshot);
       } catch (error) {

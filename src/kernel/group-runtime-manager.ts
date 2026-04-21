@@ -8,10 +8,12 @@ import type {
 import type { ConversationMessageInput } from "../providers/types";
 import {
   appendRunEvent,
+  createTurnRequest,
   createRun,
   getChatById,
   getRunById,
   getWorkspaceRuntimeState,
+  updateTurnRequest,
   updateChat,
   updateRun,
   upsertWorkspaceRuntimeState,
@@ -172,22 +174,71 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
   async prompt(
     chatId: string,
     input: ConversationMessageInput,
+    options?: {
+      sourceType?: "cli" | "desktop" | "system";
+      sourceRef?: string;
+    },
   ): Promise<RuntimeSnapshot> {
     const managed = await this.ensureManagedRuntime(chatId);
     const shouldStartRun = !managed.runtime.session.isStreaming;
+    const now = new Date().toISOString();
+    const turnRequest = createTurnRequest(this.options.db, {
+      workspaceId: managed.workspace.id,
+      chatId: managed.chat.id,
+      sourceType: options?.sourceType ?? "system",
+      sourceRef: options?.sourceRef,
+      inputMode: input.mode,
+      requestText: input.text,
+      createdAt: now,
+    });
     let startedRun: RunRow | null = null;
 
-    if (shouldStartRun) {
-      startedRun = this.startRun(managed, input.mode);
-    }
-
     try {
+      if (shouldStartRun) {
+        startedRun = this.startRun(managed, input.mode, turnRequest.id);
+        updateTurnRequest(this.options.db, turnRequest.id, {
+          status: "running",
+          startedAt: now,
+          completedAt: null,
+          error: null,
+        });
+      } else {
+        updateTurnRequest(this.options.db, turnRequest.id, {
+          status: "running",
+          startedAt: now,
+          completedAt: null,
+          error: null,
+        });
+      }
+
       await this.sendInput(managed, input);
     } catch (error) {
       if (startedRun) {
         this.finishRun(managed, "failed", formatErrorMessage(error));
+      } else {
+        updateTurnRequest(this.options.db, turnRequest.id, {
+          status: "failed",
+          completedAt: new Date().toISOString(),
+          error: formatErrorMessage(error),
+        });
       }
       throw error;
+    }
+
+    if (
+      startedRun
+      && managed.currentRunId === startedRun.id
+      && !managed.runtime.session.isStreaming
+    ) {
+      this.finishRun(managed, "completed");
+    }
+
+    if (!startedRun) {
+      updateTurnRequest(this.options.db, turnRequest.id, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        error: null,
+      });
     }
 
     this.touchChat(managed);
@@ -837,11 +888,13 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
   private startRun(
     managed: ManagedChatRuntime,
     triggerSource: string,
+    turnRequestId?: string | null,
   ): RunRow {
     this.ensureWorkspaceNotRunning(managed.workspace.id, managed.chat.id);
     this.ensureWorkspaceOnChatBranch(managed);
     const now = new Date().toISOString();
     const run = createRun(this.options.db, {
+      turnRequestId: turnRequestId ?? null,
       workspaceId: managed.workspace.id,
       chatId: managed.chat.id,
       status: "running",
@@ -881,6 +934,15 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     }
 
     const now = new Date().toISOString();
+    const currentRunId = managed.currentRunId;
+    const run = currentRunId ? getRunById(this.options.db, currentRunId) : null;
+    if (run?.turn_request_id) {
+      updateTurnRequest(this.options.db, run.turn_request_id, {
+        status,
+        completedAt: now,
+        error: error ?? null,
+      });
+    }
     updateRun(this.options.db, managed.currentRunId, {
       status,
       endedAt: now,

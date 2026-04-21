@@ -48,6 +48,40 @@ export function initDatabase(dbPath: string): Database {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS inbound_messages (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      workspace_id TEXT,
+      chat_id TEXT,
+      external_message_id TEXT NOT NULL,
+      external_chat_id TEXT NOT NULL,
+      external_thread_id TEXT,
+      sender_id TEXT NOT NULL,
+      sender_name TEXT NOT NULL DEFAULT '',
+      sender_type TEXT NOT NULL DEFAULT 'user',
+      message_type TEXT NOT NULL DEFAULT 'text',
+      content_text TEXT NOT NULL DEFAULT '',
+      raw_payload TEXT NOT NULL,
+      message_timestamp TEXT NOT NULL,
+      received_at TEXT NOT NULL,
+      mentions_me INTEGER NOT NULL DEFAULT 0,
+      dedupe_key TEXT NOT NULL,
+      UNIQUE(platform, dedupe_key)
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inbound_dispatcher_cursors (
+      consumer TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      last_inbound_message_id TEXT,
+      last_message_timestamp TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (consumer, chat_id)
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
       workspace_id TEXT NOT NULL,
@@ -133,6 +167,7 @@ export function initDatabase(dbPath: string): Database {
   db.run(`
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
+      turn_request_id TEXT,
       workspace_id TEXT NOT NULL,
       chat_id TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -142,6 +177,24 @@ export function initDatabase(dbPath: string): Database {
       updated_at TEXT NOT NULL,
       ended_at TEXT,
       cancel_requested_at TEXT,
+      error TEXT
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS turn_requests (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      source_ref TEXT,
+      input_mode TEXT NOT NULL DEFAULT 'prompt',
+      request_text TEXT NOT NULL,
+      request_payload TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'queued',
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
       error TEXT
     )
   `);
@@ -178,6 +231,7 @@ export function initDatabase(dbPath: string): Database {
   }
   migrateWorkspacesProfileKey(db);
   migrateChatsTriggerConfig(db);
+  migrateRunsTurnRequestId(db);
   dropLegacySessionsTable(db);
   migrateScheduledTasksTable(db);
   dropLegacyGroupTables(db);
@@ -225,6 +279,14 @@ function migrateChatsTriggerConfig(db: Database): void {
 
   if (!columns.includes("requires_trigger")) {
     db.run("ALTER TABLE chats ADD COLUMN requires_trigger INTEGER NOT NULL DEFAULT 1");
+  }
+}
+
+function migrateRunsTurnRequestId(db: Database): void {
+  const columns = getTableColumns(db, "runs");
+
+  if (!columns.includes("turn_request_id")) {
+    db.run("ALTER TABLE runs ADD COLUMN turn_request_id TEXT");
   }
 }
 
@@ -331,6 +393,7 @@ export type RunStatus =
 
 export interface RunRow {
   id: string;
+  turn_request_id: string | null;
   workspace_id: string;
   chat_id: string;
   status: RunStatus;
@@ -350,6 +413,64 @@ export interface RunEventRow {
   event_type: string;
   payload: string;
   created_at: string;
+}
+
+export interface InboundMessageRow {
+  id: string;
+  platform: string;
+  workspace_id: string | null;
+  chat_id: string | null;
+  external_message_id: string;
+  external_chat_id: string;
+  external_thread_id: string | null;
+  sender_id: string;
+  sender_name: string;
+  sender_type: string;
+  message_type: string;
+  content_text: string;
+  raw_payload: string;
+  message_timestamp: string;
+  received_at: string;
+  mentions_me: number;
+  dedupe_key: string;
+}
+
+export interface InboundDispatcherCursorRow {
+  consumer: string;
+  chat_id: string;
+  last_inbound_message_id: string | null;
+  last_message_timestamp: string | null;
+  updated_at: string;
+}
+
+export type TurnRequestStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TurnRequestSourceType =
+  | "channel_inbound"
+  | "cli"
+  | "desktop"
+  | "scheduled_task"
+  | "system";
+
+export interface TurnRequestRow {
+  id: string;
+  workspace_id: string;
+  chat_id: string;
+  source_type: TurnRequestSourceType;
+  source_ref: string | null;
+  input_mode: "prompt" | "follow_up" | "steer";
+  request_text: string;
+  request_payload: string;
+  status: TurnRequestStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
 }
 
 export interface MessageRow {
@@ -511,6 +632,170 @@ export function getUnprocessedMessages(
        ORDER BY timestamp ASC`,
     )
     .all({ chatJid, since }) as MessageRow[];
+}
+
+export function insertInboundMessage(
+  db: Database,
+  message: {
+    id?: string;
+    platform: string;
+    workspaceId?: string | null;
+    chatId?: string | null;
+    externalMessageId: string;
+    externalChatId: string;
+    externalThreadId?: string | null;
+    senderId: string;
+    senderName?: string;
+    senderType?: string;
+    messageType?: string;
+    contentText?: string;
+    rawPayload: string;
+    messageTimestamp: string;
+    receivedAt?: string;
+    mentionsMe?: boolean;
+    dedupeKey?: string;
+  },
+): InboundMessageRow {
+  const id = message.id ?? crypto.randomUUID();
+  const receivedAt = message.receivedAt ?? new Date().toISOString();
+  const dedupeKey = message.dedupeKey ?? message.externalMessageId;
+
+  db.query(
+    `INSERT OR IGNORE INTO inbound_messages (
+       id,
+       platform,
+       workspace_id,
+       chat_id,
+       external_message_id,
+       external_chat_id,
+       external_thread_id,
+       sender_id,
+       sender_name,
+       sender_type,
+       message_type,
+       content_text,
+       raw_payload,
+       message_timestamp,
+       received_at,
+       mentions_me,
+       dedupe_key
+     ) VALUES (
+       $id,
+       $platform,
+       $workspaceId,
+       $chatId,
+       $externalMessageId,
+       $externalChatId,
+       $externalThreadId,
+       $senderId,
+       $senderName,
+       $senderType,
+       $messageType,
+       $contentText,
+       $rawPayload,
+       $messageTimestamp,
+       $receivedAt,
+       $mentionsMe,
+       $dedupeKey
+     )`,
+  ).run({
+    id,
+    platform: message.platform,
+    workspaceId: message.workspaceId ?? null,
+    chatId: message.chatId ?? null,
+    externalMessageId: message.externalMessageId,
+    externalChatId: message.externalChatId,
+    externalThreadId: message.externalThreadId ?? null,
+    senderId: message.senderId,
+    senderName: message.senderName ?? "",
+    senderType: message.senderType ?? "user",
+    messageType: message.messageType ?? "text",
+    contentText: message.contentText ?? "",
+    rawPayload: message.rawPayload,
+    messageTimestamp: message.messageTimestamp,
+    receivedAt,
+    mentionsMe: message.mentionsMe ? 1 : 0,
+    dedupeKey,
+  });
+
+  return db
+    .query(
+      `SELECT * FROM inbound_messages
+       WHERE platform = $platform AND dedupe_key = $dedupeKey`,
+    )
+    .get({
+      platform: message.platform,
+      dedupeKey,
+    }) as InboundMessageRow;
+}
+
+export function listPendingInboundMessagesForChat(
+  db: Database,
+  chatId: string,
+  afterTimestamp: string,
+): InboundMessageRow[] {
+  return db
+    .query(
+      `SELECT * FROM inbound_messages
+       WHERE chat_id = $chatId AND message_timestamp > $afterTimestamp
+       ORDER BY message_timestamp ASC, received_at ASC, id ASC`,
+    )
+    .all({
+      chatId,
+      afterTimestamp,
+    }) as InboundMessageRow[];
+}
+
+export function getInboundDispatcherCursor(
+  db: Database,
+  consumer: string,
+  chatId: string,
+): InboundDispatcherCursorRow | null {
+  return (
+    (db
+      .query(
+        `SELECT * FROM inbound_dispatcher_cursors
+         WHERE consumer = $consumer AND chat_id = $chatId`,
+      )
+      .get({ consumer, chatId }) as InboundDispatcherCursorRow | null) ?? null
+  );
+}
+
+export function upsertInboundDispatcherCursor(
+  db: Database,
+  cursor: {
+    consumer: string;
+    chatId: string;
+    lastInboundMessageId?: string | null;
+    lastMessageTimestamp?: string | null;
+  },
+): void {
+  const updatedAt = new Date().toISOString();
+  db.query(
+    `INSERT INTO inbound_dispatcher_cursors (
+       consumer,
+       chat_id,
+       last_inbound_message_id,
+       last_message_timestamp,
+       updated_at
+     ) VALUES (
+       $consumer,
+       $chatId,
+       $lastInboundMessageId,
+       $lastMessageTimestamp,
+       $updatedAt
+     )
+     ON CONFLICT(consumer, chat_id) DO UPDATE SET
+       last_inbound_message_id = $lastInboundMessageId,
+       last_message_timestamp = $lastMessageTimestamp,
+       updated_at = $updatedAt`,
+  ).run({
+    consumer: cursor.consumer,
+    chatId: cursor.chatId,
+    lastInboundMessageId: cursor.lastInboundMessageId ?? null,
+    lastMessageTimestamp: cursor.lastMessageTimestamp ?? null,
+    updatedAt,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1443,7 @@ export function createRun(
   db: Database,
   run: {
     id?: string;
+    turnRequestId?: string | null;
     workspaceId: string;
     chatId: string;
     status: RunStatus;
@@ -1172,6 +1458,7 @@ export function createRun(
   db.query(
     `INSERT INTO runs (
        id,
+       turn_request_id,
        workspace_id,
        chat_id,
        status,
@@ -1184,6 +1471,7 @@ export function createRun(
        error
      ) VALUES (
        $id,
+       $turnRequestId,
        $workspaceId,
        $chatId,
        $status,
@@ -1197,6 +1485,7 @@ export function createRun(
      )`,
   ).run({
     id,
+    turnRequestId: run.turnRequestId ?? null,
     workspaceId: run.workspaceId,
     chatId: run.chatId,
     status: run.status,
@@ -1208,6 +1497,126 @@ export function createRun(
   });
 
   return db.query("SELECT * FROM runs WHERE id = $id").get({ id }) as RunRow;
+}
+
+export function createTurnRequest(
+  db: Database,
+  request: {
+    id?: string;
+    workspaceId: string;
+    chatId: string;
+    sourceType: TurnRequestSourceType;
+    sourceRef?: string | null;
+    inputMode?: TurnRequestRow["input_mode"];
+    requestText: string;
+    requestPayload?: string;
+    status?: TurnRequestStatus;
+    createdAt?: string;
+  },
+): TurnRequestRow {
+  const id = request.id ?? crypto.randomUUID();
+  const createdAt = request.createdAt ?? new Date().toISOString();
+  db.query(
+    `INSERT INTO turn_requests (
+       id,
+       workspace_id,
+       chat_id,
+       source_type,
+       source_ref,
+       input_mode,
+       request_text,
+       request_payload,
+       status,
+       created_at,
+       started_at,
+       completed_at,
+       error
+     ) VALUES (
+       $id,
+       $workspaceId,
+       $chatId,
+       $sourceType,
+       $sourceRef,
+       $inputMode,
+       $requestText,
+       $requestPayload,
+       $status,
+       $createdAt,
+       NULL,
+       NULL,
+       NULL
+     )`,
+  ).run({
+    id,
+    workspaceId: request.workspaceId,
+    chatId: request.chatId,
+    sourceType: request.sourceType,
+    sourceRef: request.sourceRef ?? null,
+    inputMode: request.inputMode ?? "prompt",
+    requestText: request.requestText,
+    requestPayload: request.requestPayload ?? "{}",
+    status: request.status ?? "queued",
+    createdAt,
+  });
+
+  return db
+    .query("SELECT * FROM turn_requests WHERE id = $id")
+    .get({ id }) as TurnRequestRow;
+}
+
+export function getTurnRequestById(
+  db: Database,
+  id: string,
+): TurnRequestRow | null {
+  return (
+    (db
+      .query("SELECT * FROM turn_requests WHERE id = $id")
+      .get({ id }) as TurnRequestRow | null) ?? null
+  );
+}
+
+export function listQueuedTurnRequestsForChat(
+  db: Database,
+  chatId: string,
+): TurnRequestRow[] {
+  return db
+    .query(
+      `SELECT * FROM turn_requests
+       WHERE chat_id = $chatId AND status = 'queued'
+       ORDER BY created_at ASC`,
+    )
+    .all({ chatId }) as TurnRequestRow[];
+}
+
+export function updateTurnRequest(
+  db: Database,
+  turnRequestId: string,
+  patch: {
+    status?: TurnRequestStatus;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    error?: string | null;
+  },
+): void {
+  const current = getTurnRequestById(db, turnRequestId);
+  if (!current) {
+    throw new Error(`Turn request not found: ${turnRequestId}`);
+  }
+
+  db.query(
+    `UPDATE turn_requests
+     SET status = $status,
+         started_at = $startedAt,
+         completed_at = $completedAt,
+         error = $error
+     WHERE id = $id`,
+  ).run({
+    id: turnRequestId,
+    status: patch.status ?? current.status,
+    startedAt: patch.startedAt === undefined ? current.started_at : patch.startedAt,
+    completedAt: patch.completedAt === undefined ? current.completed_at : patch.completedAt,
+    error: patch.error === undefined ? current.error : patch.error,
+  });
 }
 
 export function getRunById(

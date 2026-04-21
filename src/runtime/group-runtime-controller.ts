@@ -17,5 +17,6 @@ export interface GroupRuntimeController {
   pushMessage(chatId: string, input: ConversationMessageInput): boolean;
   isActive(chatId: string): boolean;
   enqueue(chatId: string, initialPrompt: string): Promise<EnqueueRuntimeResult>;
+  executeTurnRequest(turnRequestId: string): Promise<EnqueueRuntimeResult>;
   clearSession(chatId: string): Promise<ClearGroupSessionResult>;
 }

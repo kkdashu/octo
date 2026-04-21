@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDatabase, getRouterState, insertMessage } from "../src/db";
+import {
+  getInboundDispatcherCursor,
+  initDatabase,
+  insertInboundMessage,
+} from "../src/db";
 import { __test__ as routerTestHelpers } from "../src/router";
 import { WorkspaceService } from "../src/workspace-service";
 
@@ -29,14 +33,18 @@ describe("router /clear command", () => {
         },
       });
 
-      insertMessage(db, {
+      insertInboundMessage(db, {
         id: "msg-1",
-        chatId: "oc_main",
-        sender: "u1",
+        platform: "feishu",
+        workspaceId: workspace.id,
+        chatId: workspaceService.listChats(workspace.id)[0]!.id,
+        externalMessageId: "msg-1",
+        externalChatId: "oc_main",
+        senderId: "u1",
         senderName: "Alice",
-        content: "/clear",
-        timestamp: "2026-04-10T10:00:00.000Z",
-        isFromMe: false,
+        contentText: "/clear",
+        rawPayload: "{\"text\":\"/clear\"}",
+        messageTimestamp: "2026-04-10T10:00:00.000Z",
       });
 
       const sentMessages: Array<{ chatJid: string; text: string }> = [];
@@ -62,6 +70,10 @@ describe("router /clear command", () => {
           pushCount += 1;
           return false;
         },
+        executeTurnRequest: async () => ({
+          status: "completed",
+          failureNotified: false,
+        }),
         clearSession: async () => {
           clearCount += 1;
           return {
@@ -88,7 +100,7 @@ describe("router /clear command", () => {
           text: routerTestHelpers.buildClearSessionSystemReply(),
         },
       ]);
-      expect(getRouterState(db, "last_timestamp:oc_main")).toBe(
+      expect(getInboundDispatcherCursor(db, "default_inbound_dispatcher", workspaceService.listChats(workspace.id)[0]!.id)?.last_message_timestamp).toBe(
         "2026-04-10T10:00:00.000Z",
       );
     } finally {
@@ -108,23 +120,32 @@ describe("router /clear command", () => {
       });
       const chat = workspaceService.ensureFeishuChat(workspace.id, "oc_direct");
 
-      insertMessage(db, {
+      insertInboundMessage(db, {
         id: "msg-direct",
-        chatId: "oc_direct",
-        sender: "u1",
+        platform: "feishu",
+        workspaceId: workspace.id,
+        chatId: chat.id,
+        externalMessageId: "msg-direct",
+        externalChatId: "oc_direct",
+        senderId: "u1",
         senderName: "Alice",
-        content: "直接回复我",
-        timestamp: "2026-04-21T10:00:00.000Z",
-        isFromMe: false,
+        contentText: "直接回复我",
+        rawPayload: "{\"text\":\"直接回复我\"}",
+        messageTimestamp: "2026-04-21T10:00:00.000Z",
       });
 
-      let enqueueCount = 0;
+      let executeCount = 0;
+      let lastTurnRequestId = "";
       let lastPrompt = "";
       const groupQueue = {
         isActive: () => false,
-        enqueue: async (_chatId: string, prompt: string) => {
-          enqueueCount += 1;
-          lastPrompt = prompt;
+        enqueue: async () => ({
+          status: "completed",
+          failureNotified: false,
+        }),
+        executeTurnRequest: async (turnRequestId: string) => {
+          executeCount += 1;
+          lastTurnRequestId = turnRequestId;
           return {
             status: "completed",
             failureNotified: false,
@@ -147,9 +168,13 @@ describe("router /clear command", () => {
       );
 
       expect(chat.requires_trigger).toBe(0);
-      expect(enqueueCount).toBe(1);
+      expect(executeCount).toBe(1);
+      const createdTurnRequest = db
+        .query("SELECT request_text FROM turn_requests WHERE id = $id")
+        .get({ id: lastTurnRequestId }) as { request_text: string } | null;
+      lastPrompt = createdTurnRequest?.request_text ?? "";
       expect(lastPrompt).toContain("直接回复我");
-      expect(getRouterState(db, `last_timestamp:${chat.id}`)).toBe(
+      expect(getInboundDispatcherCursor(db, "default_inbound_dispatcher", chat.id)?.last_message_timestamp).toBe(
         "2026-04-21T10:00:00.000Z",
       );
     } finally {
@@ -169,21 +194,30 @@ describe("router /clear command", () => {
       });
       const chat = workspaceService.ensureFeishuChat(workspace.id, "oc_retry");
 
-      insertMessage(db, {
+      insertInboundMessage(db, {
         id: "msg-retry",
-        chatId: "oc_retry",
-        sender: "u1",
+        platform: "feishu",
+        workspaceId: workspace.id,
+        chatId: chat.id,
+        externalMessageId: "msg-retry",
+        externalChatId: "oc_retry",
+        senderId: "u1",
         senderName: "Alice",
-        content: "重试我",
-        timestamp: "2026-04-21T10:05:00.000Z",
-        isFromMe: false,
+        contentText: "重试我",
+        rawPayload: "{\"text\":\"重试我\"}",
+        messageTimestamp: "2026-04-21T10:05:00.000Z",
       });
 
-      let enqueueCount = 0;
+      let executeCount = 0;
       const groupQueue = {
         isActive: () => false,
-        enqueue: async () => {
-          enqueueCount += 1;
+        enqueue: async () => ({
+          status: "failed",
+          failureMessage: "AI 运行失败: Connection error.",
+          failureNotified: false,
+        }),
+        executeTurnRequest: async () => {
+          executeCount += 1;
           return {
             status: "failed",
             failureMessage: "AI 运行失败: Connection error.",
@@ -206,9 +240,8 @@ describe("router /clear command", () => {
         workspaceService,
       );
 
-      expect(enqueueCount).toBe(1);
-      expect(getRouterState(db, `last_timestamp:${chat.id}`)).toBeNull();
-      expect(getRouterState(db, "last_timestamp:oc_retry")).toBeNull();
+      expect(executeCount).toBe(1);
+      expect(getInboundDispatcherCursor(db, "default_inbound_dispatcher", chat.id)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

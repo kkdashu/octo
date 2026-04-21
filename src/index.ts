@@ -1,6 +1,6 @@
 import {
   initDatabase,
-  insertMessage,
+  insertInboundMessage,
 } from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
@@ -62,6 +62,11 @@ function ensureFeishuChatBinding(chatId: string) {
     title: isMainChat ? "Main" : chat.title,
     requiresTrigger: false,
   });
+
+  return {
+    workspace,
+    chat,
+  };
 }
 
 const feishu = new FeishuChannel(
@@ -75,8 +80,21 @@ const feishu = new FeishuChannel(
   },
   {
     onMessage: (_channel, message) => {
-      insertMessage(db, message);
-      ensureFeishuChatBinding(message.chatId);
+      const { workspace, chat } = ensureFeishuChatBinding(message.chatId);
+      insertInboundMessage(db, {
+        platform: "feishu",
+        workspaceId: workspace.id,
+        chatId: chat.id,
+        externalMessageId: message.id,
+        externalChatId: message.chatId,
+        senderId: message.sender,
+        senderName: message.senderName,
+        contentText: message.content,
+        rawPayload: JSON.stringify(message),
+        messageTimestamp: message.timestamp,
+        mentionsMe: message.mentionsMe,
+        dedupeKey: message.id,
+      });
     },
   },
 );
