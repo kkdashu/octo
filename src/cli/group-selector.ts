@@ -1,4 +1,4 @@
-import type { RegisteredGroup } from "../db";
+import type { ChatRow, RegisteredGroup } from "../db";
 
 export interface GroupSelectorUI {
   select(
@@ -29,6 +29,30 @@ export async function selectCliGroup(
 
   const options = groups.map((group) => formatGroupOption(group, currentGroupFolder));
   const byOption = new Map(options.map((option, index) => [option, groups[index]!]));
+  const selected = await ui.select(title, options);
+  return selected ? byOption.get(selected) : undefined;
+}
+
+export function formatChatOption(
+  chat: ChatRow,
+  currentChatId?: string,
+): string {
+  const currentMark = chat.id === currentChatId ? "* " : "  ";
+  return `${currentMark}${chat.title}  [${chat.active_branch}]  ${chat.id}`;
+}
+
+export async function selectWorkspaceChat(
+  ui: GroupSelectorUI,
+  chats: ChatRow[],
+  currentChatId?: string,
+  title = "Workspace Chats",
+): Promise<ChatRow | undefined> {
+  if (chats.length === 0) {
+    return undefined;
+  }
+
+  const options = chats.map((chat) => formatChatOption(chat, currentChatId));
+  const byOption = new Map(options.map((option, index) => [option, chats[index]!]));
   const selected = await ui.select(title, options);
   return selected ? byOption.get(selected) : undefined;
 }

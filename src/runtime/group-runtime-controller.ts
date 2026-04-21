@@ -8,8 +8,8 @@ export interface ClearGroupSessionResult {
 }
 
 export interface GroupRuntimeController {
-  pushMessage(groupFolder: string, input: ConversationMessageInput): boolean;
-  isActive(groupFolder: string): boolean;
-  enqueue(groupFolder: string, initialPrompt: string): Promise<void>;
-  clearSession(groupFolder: string): Promise<ClearGroupSessionResult>;
+  pushMessage(chatId: string, input: ConversationMessageInput): boolean;
+  isActive(chatId: string): boolean;
+  enqueue(chatId: string, initialPrompt: string): Promise<void>;
+  clearSession(chatId: string): Promise<ClearGroupSessionResult>;
 }

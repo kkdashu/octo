@@ -1,12 +1,17 @@
 import type { Database } from "bun:sqlite";
-import { resolve } from "node:path";
-import type { ChannelManager } from "../channels/manager";
 import {
-  getGroupByFolder,
-  getSessionRef,
+  appendRunEvent,
+  createRun,
+  getChatById,
+  listChatBindingsForChat,
   saveSessionRef,
-  type RegisteredGroup,
+  updateChat,
+  updateRun,
+  upsertWorkspaceRuntimeState,
+  type ChatRow,
+  type WorkspaceRow,
 } from "../db";
+import { getWorkspaceDirectory } from "../group-workspace";
 import { log } from "../logger";
 import {
   collectAssistantText,
@@ -26,6 +31,13 @@ import {
   createPiGroupRuntime,
   createPiGroupSessionHost,
 } from "./pi-group-runtime-factory";
+import type { ChannelManager } from "../channels/manager";
+import { WorkspaceService } from "../workspace-service";
+import {
+  checkoutWorkspaceBranch,
+  getCurrentWorkspaceBranch,
+} from "../workspace-git";
+import { calculateWorkspaceUnloadAfter } from "../workspace-runtime-state";
 
 const TAG = "feishu-group-adapter";
 
@@ -40,9 +52,10 @@ type AssistantMessageLike = Parameters<typeof collectAssistantText>[0] & {
   errorMessage?: unknown;
 };
 
-type ActiveGroupSession = {
+type ActiveChatSession = {
   host: PiGroupSessionHost;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
+  chat: ChatRow;
   generation: number;
   unsubscribe: () => void;
   reportedRuntimeFailures: Set<string>;
@@ -50,25 +63,38 @@ type ActiveGroupSession = {
   initialInputPending: boolean;
   initialInputFlush: Promise<void> | null;
   closed: boolean;
+  runId: string;
 };
 
-type CreateGroupSessionHostResult = {
+type CreateChatSessionHostResult = {
   host: PiGroupSessionHost;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
+  chat: ChatRow;
   sessionRef: string;
 };
 
 export interface FeishuGroupAdapterOptions {
   db: Database;
+  workspaceService?: WorkspaceService;
   channelManager: ChannelManager;
   imageMessagePreprocessor: ImageMessagePreprocessor;
   concurrencyLimit?: number;
   rootDir?: string;
+  createChatSessionHost?: (
+    chatId: string,
+  ) => Promise<CreateChatSessionHostResult>;
   createGroupSessionHost?: (
     groupFolder: string,
-  ) => Promise<CreateGroupSessionHostResult>;
+  ) => Promise<{
+    host: PiGroupSessionHost;
+    group: {
+      folder: string;
+    };
+    sessionRef: string;
+  }>;
+  resetChatSession?: (chatId: string) => Promise<string>;
   resetGroupSession?: (groupFolder: string) => Promise<string>;
-  preparePrompt?: (groupFolder: string, text: string) => Promise<string>;
+  preparePrompt?: (chatId: string, text: string) => Promise<string>;
 }
 
 function toError(error: unknown): Error {
@@ -114,63 +140,101 @@ function extractAssistantRuntimeFailure(
 }
 
 export class FeishuGroupAdapter implements GroupRuntimeController {
-  private readonly db: Database;
-  private readonly channelManager: ChannelManager;
-  private readonly imageMessagePreprocessor: ImageMessagePreprocessor;
+  private readonly workspaceService: WorkspaceService;
   private readonly concurrencyLimit: number;
   private readonly rootDir: string;
   private readonly locks = new Map<string, Promise<void>>();
-  private readonly activeSessions = new Map<string, ActiveGroupSession>();
+  private readonly activeSessions = new Map<string, ActiveChatSession>();
   private readonly sessionGenerations = new Map<string, number>();
   private readonly outboundLocks = new Map<string, Promise<void>>();
   private activeTasks = 0;
-  private readonly createGroupSessionHost: (
-    groupFolder: string,
-  ) => Promise<CreateGroupSessionHostResult>;
-  private readonly resetGroupSession: (groupFolder: string) => Promise<string>;
-  private readonly preparePrompt: (groupFolder: string, text: string) => Promise<string>;
+  private readonly createChatSessionHost: (
+    chatId: string,
+  ) => Promise<CreateChatSessionHostResult>;
+  private readonly resetChatSession: (chatId: string) => Promise<string>;
+  private readonly preparePrompt: (chatId: string, text: string) => Promise<string>;
 
-  constructor(options: FeishuGroupAdapterOptions) {
-    this.db = options.db;
-    this.channelManager = options.channelManager;
-    this.imageMessagePreprocessor = options.imageMessagePreprocessor;
+  constructor(private readonly options: FeishuGroupAdapterOptions) {
+    this.workspaceService = options.workspaceService
+      ?? new WorkspaceService(options.db, { rootDir: options.rootDir ?? process.cwd() });
     this.concurrencyLimit = options.concurrencyLimit ?? 3;
     this.rootDir = options.rootDir ?? process.cwd();
-    this.createGroupSessionHost = options.createGroupSessionHost
-      ?? ((groupFolder) =>
-        createPiGroupSessionHost({
-          db: this.db,
+    const legacyCreateGroupSessionHost = options.createGroupSessionHost;
+    this.createChatSessionHost = options.createChatSessionHost
+      ?? (legacyCreateGroupSessionHost
+        ? async (chatId) => {
+          const chat = this.resolveChat(chatId);
+          const workspace = this.getWorkspaceForChat(chat);
+          const created = await legacyCreateGroupSessionHost(workspace.folder);
+          return {
+            host: created.host,
+            workspace,
+            chat,
+            sessionRef: created.sessionRef,
+          };
+        }
+        : undefined)
+      ?? (async (chatId) => {
+        const chat = this.resolveChat(chatId);
+        const workspace = this.getWorkspaceForChat(chat);
+        const { host, sessionRef } = await createPiGroupSessionHost({
+          db: options.db,
           rootDir: this.rootDir,
-          groupFolder,
+          groupFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
-        }));
-    this.resetGroupSession = options.resetGroupSession
-      ?? (async (groupFolder) => {
-        const { runtime, group, sessionRef } = await createPiGroupRuntime({
-          db: this.db,
+          sessionRefOverride: chat.session_ref,
+          persistSessionRef: false,
+        });
+
+        return {
+          host,
+          workspace,
+          chat,
+          sessionRef,
+        };
+      });
+    const legacyResetGroupSession = options.resetGroupSession;
+    this.resetChatSession = options.resetChatSession
+      ?? (legacyResetGroupSession
+        ? async (chatId) => {
+          const chat = this.resolveChat(chatId);
+          const workspace = this.getWorkspaceForChat(chat);
+          return legacyResetGroupSession(workspace.folder);
+        }
+        : undefined)
+      ?? (async (chatId) => {
+        const chat = this.resolveChat(chatId);
+        const workspace = this.getWorkspaceForChat(chat);
+        const { runtime, sessionRef } = await createPiGroupRuntime({
+          db: options.db,
           rootDir: this.rootDir,
-          groupFolder,
+          groupFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
+          sessionRefOverride: chat.session_ref,
+          persistSessionRef: false,
         });
 
         try {
           await runtime.newSession();
           const nextSessionRef = runtime.session.sessionFile ?? sessionRef;
-          saveSessionRef(this.db, group.folder, nextSessionRef);
+          this.persistSessionRef(chat.id, nextSessionRef);
           return nextSessionRef;
         } finally {
           await runtime.dispose();
         }
       });
     this.preparePrompt = options.preparePrompt
-      ?? ((groupFolder, text) =>
-        normalizePromptForAgent(
+      ?? ((chatId, text) => {
+        const chat = this.resolveChat(chatId);
+        const workspace = this.getWorkspaceForChat(chat);
+        return normalizePromptForAgent(
           text,
           this.rootDir,
-          resolve(this.rootDir, "groups", groupFolder),
-          this.imageMessagePreprocessor,
+          getWorkspaceDirectory(workspace.folder, { rootDir: this.rootDir }),
+          options.imageMessagePreprocessor,
           TAG,
-        ));
+        );
+      });
 
     log.info(TAG, "FeishuGroupAdapter initialized", {
       concurrencyLimit: this.concurrencyLimit,
@@ -178,9 +242,10 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     });
   }
 
-  pushMessage(groupFolder: string, input: ConversationMessageInput): boolean {
-    const activeSession = this.activeSessions.get(groupFolder);
-    if (!activeSession) {
+  pushMessage(chatId: string, input: ConversationMessageInput): boolean {
+    const chat = this.resolveChat(chatId);
+    const activeSession = this.activeSessions.get(chat.workspace_id);
+    if (!activeSession || activeSession.chat.id !== chat.id) {
       return false;
     }
 
@@ -190,148 +255,200 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     }
 
     void this.sendInput(activeSession, input).catch((error) => {
-      log.error(TAG, `Failed to push ${input.mode} message to ${groupFolder}`, error);
+      log.error(TAG, `Failed to push ${input.mode} message to ${chat.id}`, error);
       void this.reportRuntimeFailure(activeSession, error);
     });
     return true;
   }
 
-  isActive(groupFolder: string): boolean {
-    return this.activeSessions.has(groupFolder);
+  isActive(chatId: string): boolean {
+    const chat = this.resolveChat(chatId);
+    const activeSession = this.activeSessions.get(chat.workspace_id);
+    return activeSession?.chat.id === chat.id;
   }
 
-  async enqueue(groupFolder: string, initialPrompt: string): Promise<void> {
-    const existing = this.locks.get(groupFolder);
+  async enqueue(chatId: string, initialPrompt: string): Promise<void> {
+    const chat = this.resolveChat(chatId);
+    const existing = this.locks.get(chat.workspace_id);
     const task = (existing ?? Promise.resolve()).then(() =>
-      this.runTurn(groupFolder, initialPrompt),
+      this.runTurn(chat.id, initialPrompt),
     );
     const lockPromise = task.then(
       () => undefined,
       () => undefined,
     );
-    this.locks.set(groupFolder, lockPromise);
+    this.locks.set(chat.workspace_id, lockPromise);
 
     task.finally(() => {
-      if (this.locks.get(groupFolder) === lockPromise) {
-        this.locks.delete(groupFolder);
+      if (this.locks.get(chat.workspace_id) === lockPromise) {
+        this.locks.delete(chat.workspace_id);
       }
     });
 
     return task;
   }
 
-  async clearSession(groupFolder: string): Promise<ClearGroupSessionResult> {
-    log.info(TAG, `Clearing session for group ${groupFolder}`);
+  async clearSession(chatId: string): Promise<ClearGroupSessionResult> {
+    const chat = this.resolveChat(chatId);
+    const workspace = this.getWorkspaceForChat(chat);
+    const previousSessionRef = chat.session_ref;
+    const generation = this.bumpSessionGeneration(chat.id);
+    const activeSession = this.activeSessions.get(workspace.id);
+    const closedActiveSession = activeSession?.chat.id === chat.id;
 
-    const group = getGroupByFolder(this.db, groupFolder);
-    if (!group) {
-      throw new Error(`Group not found: ${groupFolder}`);
-    }
-
-    const previousSessionRef = getSessionRef(this.db, groupFolder);
-    const generation = this.bumpSessionGeneration(groupFolder);
-    const activeSession = this.activeSessions.get(groupFolder);
-    const closedActiveSession = !!activeSession;
-
-    if (activeSession) {
+    if (activeSession && activeSession.chat.id === chat.id) {
       activeSession.closed = true;
-      this.activeSessions.delete(groupFolder);
+      this.activeSessions.delete(workspace.id);
       try {
         await activeSession.host.session.abort();
       } catch (error) {
-        log.warn(TAG, `Abort failed while clearing session for ${groupFolder}`, {
+        log.warn(TAG, `Abort failed while clearing session for ${chat.id}`, {
           error: error instanceof Error ? error.message : String(error),
         });
       }
       activeSession.unsubscribe();
       await activeSession.host.dispose().catch((error) => {
-        log.warn(TAG, `Dispose failed while clearing session for ${groupFolder}`, {
+        log.warn(TAG, `Dispose failed while clearing session for ${chat.id}`, {
           error: error instanceof Error ? error.message : String(error),
         });
       });
     }
 
-    const sessionRef = await this.resetGroupSession(groupFolder);
-    saveSessionRef(this.db, groupFolder, sessionRef);
-
-    log.info(TAG, `Session cleared for group ${groupFolder}`, {
-      previousSessionRef,
-      sessionRef,
-      generation,
-      closedActiveSession,
-    });
+    const sessionRef = await this.resetChatSession(chat.id);
+    this.persistSessionRef(chat.id, sessionRef);
 
     return {
-      closedActiveSession,
+      closedActiveSession: Boolean(closedActiveSession),
       previousSessionRef,
       sessionRef,
       generation,
     };
   }
 
-  private getSessionGeneration(groupFolder: string): number {
-    return this.sessionGenerations.get(groupFolder) ?? 0;
+  private resolveChat(chatId: string): ChatRow {
+        const directChat = this.workspaceService.getChatById(chatId);
+    if (directChat) {
+      return directChat;
+    }
+
+    const workspace = this.workspaceService.getWorkspaceById(chatId)
+      ?? this.workspaceService.getWorkspaceByFolder(chatId);
+    if (workspace) {
+      const firstChat = this.workspaceService.listChats(workspace.id)[0] ?? null;
+      if (firstChat) {
+        return firstChat;
+      }
+    }
+
+    throw new Error(`Chat not found: ${chatId}`);
   }
 
-  private bumpSessionGeneration(groupFolder: string): number {
-    const nextGeneration = this.getSessionGeneration(groupFolder) + 1;
-    this.sessionGenerations.set(groupFolder, nextGeneration);
+  private getWorkspaceForChat(chat: ChatRow): WorkspaceRow {
+    const workspace = this.workspaceService.getWorkspaceById(chat.workspace_id);
+    if (!workspace) {
+      throw new Error(`Workspace not found: ${chat.workspace_id}`);
+    }
+
+    return workspace;
+  }
+
+  private getSessionGeneration(chatId: string): number {
+    return this.sessionGenerations.get(chatId) ?? 0;
+  }
+
+  private bumpSessionGeneration(chatId: string): number {
+    const nextGeneration = this.getSessionGeneration(chatId) + 1;
+    this.sessionGenerations.set(chatId, nextGeneration);
     return nextGeneration;
   }
 
   private createMessageSender(_context: PiGroupRuntimeContext) {
     return {
-      send: (chatJid: string, text: string) => this.channelManager.send(chatJid, text),
+      send: (chatJid: string, text: string) => this.options.channelManager.send(chatJid, text),
       sendImage: (chatJid: string, filePath: string) =>
-        this.channelManager.sendImage(chatJid, filePath),
+        this.options.channelManager.sendImage(chatJid, filePath),
       refreshGroupMetadata: async () => {
-        const chats = await this.channelManager.refreshGroupMetadata();
+        const chats = await this.options.channelManager.refreshGroupMetadata();
         return { count: chats.length };
       },
-      clearSession: (folder: string) => this.clearSession(folder),
+      clearSession: async (folder: string) => {
+        const workspace = this.workspaceService.getWorkspaceByFolder(folder);
+        if (!workspace) {
+          throw new Error(`Workspace not found: ${folder}`);
+        }
+
+        const defaultChat = this.workspaceService.listChats(workspace.id)[0] ?? null;
+        if (!defaultChat) {
+          throw new Error(`Chat not found for workspace: ${folder}`);
+        }
+
+        return this.clearSession(defaultChat.id);
+      },
     };
   }
 
-  private async runTurn(groupFolder: string, initialPrompt: string): Promise<void> {
-    await this.waitForConcurrencySlot(groupFolder);
+  private async runTurn(chatId: string, initialPrompt: string): Promise<void> {
+    const initialChat = this.resolveChat(chatId);
+    const initialWorkspace = this.getWorkspaceForChat(initialChat);
+    await this.waitForConcurrencySlot(initialWorkspace.id);
     this.activeTasks += 1;
 
-    const sessionGeneration = this.getSessionGeneration(groupFolder);
-    let activeSession: ActiveGroupSession | null = null;
-
-    log.info(TAG, `Starting Pi-native turn for ${groupFolder}`, {
-      activeTasks: this.activeTasks,
-      concurrencyLimit: this.concurrencyLimit,
-      sessionGeneration,
-    });
+    const sessionGeneration = this.getSessionGeneration(initialChat.id);
+    let activeSession: ActiveChatSession | null = null;
 
     try {
-      const created = await this.createGroupSessionHost(groupFolder);
-      if (sessionGeneration !== this.getSessionGeneration(groupFolder)) {
+      const created = await this.createChatSessionHost(initialChat.id);
+      if (sessionGeneration !== this.getSessionGeneration(created.chat.id)) {
         await created.host.dispose();
-        log.warn(TAG, `Discarding stale runtime startup for ${groupFolder}`, {
-          sessionGeneration,
-          currentGeneration: this.getSessionGeneration(groupFolder),
-        });
         return;
       }
 
+      this.ensureWorkspaceOnChatBranch(created.workspace, created.chat);
+      const now = new Date().toISOString();
+      const run = createRun(this.options.db, {
+        workspaceId: created.workspace.id,
+        chatId: created.chat.id,
+        status: "running",
+        branch: created.chat.active_branch,
+        triggerSource: "router",
+        startedAt: now,
+      });
+      upsertWorkspaceRuntimeState(this.options.db, {
+        workspaceId: created.workspace.id,
+        checkedOutBranch: created.chat.active_branch,
+        activeRunId: run.id,
+        status: "running",
+        lastActivityAt: now,
+        unloadAfter: null,
+      });
+      appendRunEvent(this.options.db, {
+        runId: run.id,
+        chatId: created.chat.id,
+        eventType: "run_started",
+        payload: JSON.stringify({
+          branch: created.chat.active_branch,
+        }),
+        createdAt: now,
+      });
+
       activeSession = {
         host: created.host,
-        group: created.group,
+        workspace: created.workspace,
+        chat: created.chat,
         generation: sessionGeneration,
-        unsubscribe: () => {},
+        unsubscribe: () => undefined,
         reportedRuntimeFailures: new Set(),
         pendingInitialInputs: [],
         initialInputPending: true,
         initialInputFlush: null,
         closed: false,
+        runId: run.id,
       };
-      const unsubscribe = created.host.session.subscribe((event: SessionEvent) => {
+
+      activeSession.unsubscribe = created.host.session.subscribe((event: SessionEvent) => {
         this.handleSessionEvent(activeSession!, event);
       });
-      activeSession.unsubscribe = unsubscribe;
-      this.activeSessions.set(groupFolder, activeSession);
+      this.activeSessions.set(created.workspace.id, activeSession);
 
       await this.sendInput(activeSession, {
         mode: "prompt",
@@ -344,56 +461,49 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         },
       });
       await this.releasePendingInitialInputs(activeSession, { wait: true });
-      await this.waitForOutboundDrain(groupFolder);
+      await this.waitForOutboundDrain(activeSession.chat.id);
 
-      if (sessionGeneration === this.getSessionGeneration(groupFolder)) {
+      if (sessionGeneration === this.getSessionGeneration(activeSession.chat.id)) {
         const sessionRef = created.host.session.sessionFile ?? created.sessionRef;
-        saveSessionRef(this.db, groupFolder, sessionRef);
-        log.info(TAG, `Saved Pi session ref after turn`, {
-          groupFolder,
-          sessionRef,
-          sessionGeneration,
-        });
+        this.persistSessionRef(activeSession.chat.id, sessionRef);
       }
+
+      this.finishRun(activeSession, "completed");
     } catch (error) {
-      log.error(TAG, `Failed to run turn for group ${groupFolder}`, error);
+      log.error(TAG, `Failed to run turn for chat ${initialChat.id}`, error);
       if (activeSession) {
+        this.finishRun(activeSession, "failed", toError(error).message);
         await this.reportRuntimeFailure(activeSession, error);
       }
     } finally {
       if (
         activeSession
-        && this.activeSessions.get(groupFolder)?.generation === sessionGeneration
+        && this.activeSessions.get(activeSession.workspace.id)?.generation === sessionGeneration
       ) {
-        this.activeSessions.delete(groupFolder);
+        this.activeSessions.delete(activeSession.workspace.id);
       }
       if (activeSession) {
         activeSession.closed = true;
         activeSession.unsubscribe();
         await activeSession.host.dispose().catch((error) => {
-          log.warn(TAG, `Failed to dispose group runtime for ${groupFolder}`, {
+          log.warn(TAG, `Failed to dispose runtime for ${activeSession.chat.id}`, {
             error: error instanceof Error ? error.message : String(error),
           });
         });
       }
       this.activeTasks = Math.max(0, this.activeTasks - 1);
-      log.debug(TAG, `Turn finished for ${groupFolder}`, {
-        activeTasks: this.activeTasks,
-        concurrencyLimit: this.concurrencyLimit,
-        sessionGeneration,
-      });
     }
   }
 
   private async sendInput(
-    activeSession: ActiveGroupSession,
+    activeSession: ActiveChatSession,
     input: ConversationMessageInput,
     options?: {
       onPromptDispatched?(): void;
     },
   ): Promise<void> {
     const normalizedPrompt = await this.preparePrompt(
-      activeSession.group.folder,
+      activeSession.chat.id,
       input.text,
     );
 
@@ -433,22 +543,21 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
   }
 
   private handleSessionEvent(
-    activeSession: ActiveGroupSession,
+    activeSession: ActiveChatSession,
     event: SessionEvent,
   ): void {
-    const currentGeneration = this.getSessionGeneration(activeSession.group.folder);
+    const currentGeneration = this.getSessionGeneration(activeSession.chat.id);
     if (activeSession.generation !== currentGeneration) {
       return;
     }
 
     if (event.type === "message_end") {
       const message = (event.message ?? {}) as AssistantMessageLike;
-      const text = collectAssistantText(
-        message,
-      );
+      const text = collectAssistantText(message);
 
       if (text) {
-        void this.enqueueOutboundMessage(activeSession.group, text);
+        this.appendRuntimeEvent(activeSession, "assistant_text", { text });
+        void this.enqueueOutboundMessage(activeSession.chat, text);
       }
 
       const runtimeFailure = extractAssistantRuntimeFailure(message);
@@ -466,19 +575,15 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       || event.type === "auto_retry_start"
       || event.type === "auto_retry_end"
     ) {
+      this.appendRuntimeEvent(activeSession, event.type, {});
       if (event.type === "turn_start") {
         void this.releasePendingInitialInputs(activeSession);
       }
-
-      log.debug(TAG, `Pi diagnostic for ${activeSession.group.folder}`, {
-        type: event.type,
-        sessionGeneration: activeSession.generation,
-      });
     }
   }
 
   private async reportRuntimeFailure(
-    activeSession: ActiveGroupSession,
+    activeSession: ActiveChatSession,
     error: unknown,
   ): Promise<void> {
     const formatted = formatRuntimeFailureMessage(error);
@@ -487,40 +592,51 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     }
 
     activeSession.reportedRuntimeFailures.add(formatted);
-    await this.enqueueOutboundMessage(activeSession.group, formatted);
+    this.appendRuntimeEvent(activeSession, "error", {
+      message: formatted,
+    });
+    await this.enqueueOutboundMessage(activeSession.chat, formatted);
   }
 
-  private enqueueOutboundMessage(
-    group: RegisteredGroup,
+  private async enqueueOutboundMessage(
+    chat: ChatRow,
     text: string,
   ): Promise<void> {
-    const existing = this.outboundLocks.get(group.folder);
+    const binding = listChatBindingsForChat(this.options.db, chat.id)
+      .find((item) => item.platform === "feishu")
+      ?? listChatBindingsForChat(this.options.db, chat.id)[0]
+      ?? null;
+    if (!binding) {
+      throw new Error(`Chat binding not found: ${chat.id}`);
+    }
+
+    const existing = this.outboundLocks.get(chat.id);
     const task = (existing ?? Promise.resolve()).then(async () => {
-      await this.channelManager.send(group.jid, text);
+      await this.options.channelManager.send(binding.external_chat_id, text);
     });
     const lockPromise = task.then(
       () => undefined,
       () => undefined,
     );
 
-    this.outboundLocks.set(group.folder, lockPromise);
+    this.outboundLocks.set(chat.id, lockPromise);
     task.catch((error) => {
-      log.error(TAG, `Failed to send assistant reply for ${group.folder}`, error);
+      log.error(TAG, `Failed to send assistant reply for ${chat.id}`, error);
     }).finally(() => {
-      if (this.outboundLocks.get(group.folder) === lockPromise) {
-        this.outboundLocks.delete(group.folder);
+      if (this.outboundLocks.get(chat.id) === lockPromise) {
+        this.outboundLocks.delete(chat.id);
       }
     });
 
     return lockPromise;
   }
 
-  private async waitForOutboundDrain(groupFolder: string): Promise<void> {
-    await this.outboundLocks.get(groupFolder);
+  private async waitForOutboundDrain(chatId: string): Promise<void> {
+    await this.outboundLocks.get(chatId);
   }
 
   private releasePendingInitialInputs(
-    activeSession: ActiveGroupSession,
+    activeSession: ActiveChatSession,
     options?: { wait?: boolean },
   ): Promise<void> {
     if (activeSession.closed) {
@@ -539,7 +655,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     return Promise.resolve();
   }
 
-  private flushPendingInitialInputs(activeSession: ActiveGroupSession): Promise<void> {
+  private flushPendingInitialInputs(activeSession: ActiveChatSession): Promise<void> {
     if (activeSession.closed) {
       return Promise.resolve();
     }
@@ -559,41 +675,92 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         try {
           await this.sendInput(activeSession, nextInput);
         } catch (error) {
-          log.error(
-            TAG,
-            `Failed to flush queued ${nextInput.mode} message to ${activeSession.group.folder}`,
-            error,
-          );
           await this.reportRuntimeFailure(activeSession, error);
         }
       }
     })().finally(() => {
-      if (activeSession.initialInputFlush === flushPromise) {
-        activeSession.initialInputFlush = null;
-      }
+      activeSession.initialInputFlush = null;
     });
 
     activeSession.initialInputFlush = flushPromise;
     return flushPromise;
   }
 
-  private async waitForConcurrencySlot(groupFolder: string): Promise<void> {
-    if (this.activeTasks >= this.concurrencyLimit) {
-      log.warn(TAG, `Concurrency limit reached, waiting for slot`, {
-        groupFolder,
-        activeTasks: this.activeTasks,
-        concurrencyLimit: this.concurrencyLimit,
-      });
-    }
-
-    while (this.activeTasks >= this.concurrencyLimit) {
+  private async waitForConcurrencySlot(workspaceId: string): Promise<void> {
+    while (
+      this.activeTasks >= this.concurrencyLimit
+      || (this.activeSessions.has(workspaceId) && !this.activeSessions.get(workspaceId)?.closed)
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-}
 
-export const __test__ = {
-  extractAssistantRuntimeFailure,
-  formatRuntimeFailureMessage,
-  toError,
-};
+  private persistSessionRef(chatId: string, sessionRef: string | null): void {
+    updateChat(this.options.db, chatId, {
+      sessionRef,
+      lastActivityAt: new Date().toISOString(),
+    });
+    if (sessionRef) {
+      const chat = this.resolveChat(chatId);
+      const workspace = this.getWorkspaceForChat(chat);
+      saveSessionRef(this.options.db, workspace.folder, sessionRef);
+    }
+  }
+
+  private ensureWorkspaceOnChatBranch(
+    workspace: WorkspaceRow,
+    chat: ChatRow,
+  ): void {
+    const workspaceDir = getWorkspaceDirectory(workspace.folder, {
+      rootDir: this.rootDir,
+    });
+    const currentBranch = getCurrentWorkspaceBranch(workspaceDir);
+    if (currentBranch !== chat.active_branch) {
+      checkoutWorkspaceBranch(workspaceDir, chat.active_branch);
+    }
+  }
+
+  private finishRun(
+    activeSession: ActiveChatSession,
+    status: "completed" | "failed" | "cancelled",
+    error?: string,
+  ): void {
+    const now = new Date().toISOString();
+    updateRun(this.options.db, activeSession.runId, {
+      status,
+      endedAt: now,
+      error: error ?? null,
+    });
+    appendRunEvent(this.options.db, {
+      runId: activeSession.runId,
+      chatId: activeSession.chat.id,
+      eventType: `run_${status}`,
+      payload: JSON.stringify({
+        error: error ?? null,
+      }),
+      createdAt: now,
+    });
+    upsertWorkspaceRuntimeState(this.options.db, {
+      workspaceId: activeSession.workspace.id,
+      checkedOutBranch: activeSession.chat.active_branch,
+      activeRunId: null,
+      status: status === "failed" ? "error" : "idle",
+      lastActivityAt: now,
+      unloadAfter: calculateWorkspaceUnloadAfter(new Date(now)),
+      lastError: status === "failed" ? error ?? null : null,
+    });
+  }
+
+  private appendRuntimeEvent(
+    activeSession: ActiveChatSession,
+    eventType: string,
+    payload: unknown,
+  ): void {
+    appendRunEvent(this.options.db, {
+      runId: activeSession.runId,
+      chatId: activeSession.chat.id,
+      eventType,
+      payload: JSON.stringify(payload),
+    });
+  }
+}

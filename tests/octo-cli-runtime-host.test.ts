@@ -12,6 +12,7 @@ import { OctoCliRuntimeHost } from "../src/cli/octo-cli-runtime-host";
 import { CliStateStore } from "../src/cli/state-store";
 import { GroupRuntimeManager } from "../src/kernel/group-runtime-manager";
 import type { MessageSender } from "../src/tools";
+import { WorkspaceService } from "../src/workspace-service";
 
 function createProfilesConfig(rootDir: string): string {
   const configPath = join(rootDir, "agent-profiles.json");
@@ -142,14 +143,23 @@ describe("OctoCliRuntimeHost", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       const currentGroup = groupService.createCliGroup({ name: "Current" });
+      const currentWorkspace = workspaceService.getWorkspaceByFolder(currentGroup.folder);
+      if (!currentWorkspace) {
+        throw new Error("Current workspace missing");
+      }
+      const currentChat = workspaceService.listChats(currentWorkspace.id)[0];
+      if (!currentChat) {
+        throw new Error("Current chat missing");
+      }
       const currentCwd = join(rootDir, "groups", currentGroup.folder);
       const currentSessionPath = createSessionFile(currentCwd, "current");
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
       const current = createFakeRuntime(currentSessionPath, currentCwd);
       const manager = new GroupRuntimeManager({
         db,
-        groupService,
+        workspaceService,
         rootDir,
         createMessageSender: () => createNoopMessageSender(),
         createGroupRuntime: async (groupFolder) => {
@@ -167,6 +177,8 @@ describe("OctoCliRuntimeHost", () => {
       const host = new OctoCliRuntimeHost({
         manager,
         stateStore,
+        currentWorkspace,
+        currentChat,
         currentGroup,
         runtime: current.runtime,
       });
@@ -176,7 +188,7 @@ describe("OctoCliRuntimeHost", () => {
       const outsideSessionPath = createSessionFile(outsideCwd, "outside");
 
       await expect(host.switchSession(outsideSessionPath)).rejects.toThrow(
-        "Session is outside Octo registered groups",
+        "Session is outside Octo registered workspaces",
       );
     } finally {
       if (previousProfilesPath === undefined) {
@@ -197,8 +209,19 @@ describe("OctoCliRuntimeHost", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       const firstGroup = groupService.createCliGroup({ name: "First" });
       const secondGroup = groupService.createCliGroup({ name: "Second" });
+      const firstWorkspace = workspaceService.getWorkspaceByFolder(firstGroup.folder);
+      const secondWorkspace = workspaceService.getWorkspaceByFolder(secondGroup.folder);
+      if (!firstWorkspace || !secondWorkspace) {
+        throw new Error("workspace missing");
+      }
+      const firstChat = workspaceService.listChats(firstWorkspace.id)[0];
+      const secondChat = workspaceService.listChats(secondWorkspace.id)[0];
+      if (!firstChat || !secondChat) {
+        throw new Error("chat missing");
+      }
       const firstCwd = join(rootDir, "groups", firstGroup.folder);
       const secondCwd = join(rootDir, "groups", secondGroup.folder);
       const firstSessionPath = createSessionFile(firstCwd, "first");
@@ -209,7 +232,7 @@ describe("OctoCliRuntimeHost", () => {
       const second = createFakeRuntime(secondSessionPath, secondCwd);
       const manager = new GroupRuntimeManager({
         db,
-        groupService,
+        workspaceService,
         rootDir,
         createMessageSender: () => createNoopMessageSender(),
         createGroupRuntime: async (groupFolder) => {
@@ -235,6 +258,8 @@ describe("OctoCliRuntimeHost", () => {
       const host = new OctoCliRuntimeHost({
         manager,
         stateStore,
+        currentWorkspace: firstWorkspace,
+        currentChat: firstChat,
         currentGroup: firstGroup,
         runtime: first.runtime,
       });
@@ -242,9 +267,110 @@ describe("OctoCliRuntimeHost", () => {
       await host.switchGroup(secondGroup);
 
       expect(host.getCurrentGroup().folder).toBe(secondGroup.folder);
+      expect(host.getCurrentWorkspace().folder).toBe(secondGroup.folder);
+      expect(host.getCurrentChat().id).toBe(secondChat.id);
       expect(host.session.sessionFile).toBe(secondSessionPath);
       expect(getSessionRef(db, secondGroup.folder)).toBe(secondSessionPath);
       expect(stateStore.getCurrentGroupFolder()).toBe(secondGroup.folder);
+      expect(stateStore.getCurrentWorkspaceFolder()).toBe(secondGroup.folder);
+      expect(stateStore.getCurrentChatId()).toBe(secondChat.id);
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("switchChat notifies external switch handler after applying runtime", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-cli-runtime-host-"));
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      const configPath = createProfilesConfig(rootDir);
+      process.env.AGENT_PROFILES_PATH = configPath;
+      const db = initDatabase(join(rootDir, "store", "messages.db"));
+      const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
+      const group = groupService.createCliGroup({ name: "Current" });
+      const workspace = workspaceService.getWorkspaceByFolder(group.folder);
+      if (!workspace) {
+        throw new Error("workspace missing");
+      }
+      const [firstChat] = workspaceService.listChats(workspace.id);
+      if (!firstChat) {
+        throw new Error("default chat missing");
+      }
+      const secondChat = workspaceService.createChat(workspace.id, {
+        title: "Route B",
+        requiresTrigger: false,
+      });
+      const cwd = join(rootDir, "groups", group.folder);
+      const firstSessionPath = createSessionFile(cwd, "first");
+      const secondSessionPath = createSessionFile(cwd, "second");
+      const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
+      const first = createFakeRuntime(firstSessionPath, cwd);
+      const second = createFakeRuntime(secondSessionPath, cwd);
+      const manager = new GroupRuntimeManager({
+        db,
+        workspaceService,
+        rootDir,
+        createMessageSender: () => createNoopMessageSender(),
+        createChatRuntime: async (chatId) => {
+          if (chatId === firstChat.id) {
+            return {
+              workspace,
+              chat: firstChat,
+              runtime: first.runtime,
+              sessionRef: firstSessionPath,
+            };
+          }
+
+          if (chatId === secondChat.id) {
+            return {
+              workspace,
+              chat: secondChat,
+              runtime: second.runtime,
+              sessionRef: secondSessionPath,
+            };
+          }
+
+          throw new Error(`Unexpected test chat: ${chatId}`);
+        },
+      });
+      const host = new OctoCliRuntimeHost({
+        manager,
+        stateStore,
+        currentWorkspace: workspace,
+        currentChat: firstChat,
+        currentGroup: group,
+        runtime: first.runtime,
+      });
+      const events: Array<{
+        kind: string;
+        chatId: string;
+        sessionRef: string | undefined;
+      }> = [];
+      host.setExternalSwitchHandler((event) => {
+        events.push({
+          kind: event.kind,
+          chatId: event.chat.id,
+          sessionRef: event.runtime.session.sessionFile,
+        });
+      });
+
+      await host.switchChat(secondChat);
+
+      expect(host.getCurrentChat().id).toBe(secondChat.id);
+      expect(events).toEqual([
+        {
+          kind: "chat",
+          chatId: secondChat.id,
+          sessionRef: secondSessionPath,
+        },
+      ]);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;
@@ -264,14 +390,23 @@ describe("OctoCliRuntimeHost", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       const group = groupService.createCliGroup({ name: "Import" });
+      const workspace = workspaceService.getWorkspaceByFolder(group.folder);
+      if (!workspace) {
+        throw new Error("workspace missing");
+      }
+      const chat = workspaceService.listChats(workspace.id)[0];
+      if (!chat) {
+        throw new Error("chat missing");
+      }
       const cwd = join(rootDir, "groups", group.folder);
       const sessionPath = createSessionFile(cwd, "base");
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
       const current = createFakeRuntime(sessionPath, cwd);
       const manager = new GroupRuntimeManager({
         db,
-        groupService,
+        workspaceService,
         rootDir,
         createMessageSender: () => createNoopMessageSender(),
         createGroupRuntime: async (groupFolder) => {
@@ -289,6 +424,8 @@ describe("OctoCliRuntimeHost", () => {
       const host = new OctoCliRuntimeHost({
         manager,
         stateStore,
+        currentWorkspace: workspace,
+        currentChat: chat,
         currentGroup: group,
         runtime: current.runtime,
       });
@@ -301,7 +438,7 @@ describe("OctoCliRuntimeHost", () => {
           cwdOverride: cwd,
         },
       ]);
-      expect(getSessionRef(db, group.folder)).toBe(
+      expect(workspaceService.getChatById(chat.id)?.session_ref).toBe(
         join(cwd, ".pi", "sessions", "imported.jsonl"),
       );
     } finally {

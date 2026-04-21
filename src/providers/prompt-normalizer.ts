@@ -31,7 +31,9 @@ export function resolveAgentReadablePath(
   }
 
   const absolutePath =
-    normalizedPath.startsWith("media/") || normalizedPath.startsWith("groups/")
+    normalizedPath.startsWith("media/")
+      || normalizedPath.startsWith("groups/")
+      || normalizedPath.startsWith("workspaces/")
       ? resolve(rootDir, normalizedPath)
       : resolve(workingDirectory, normalizedPath);
   const relativePath = relative(workingDirectory, absolutePath);
@@ -72,7 +74,9 @@ function isExistingLocalFilePath(
 
   const absolutePath = isAbsolute(normalizedPath)
     ? normalizedPath
-    : normalizedPath.startsWith("media/") || normalizedPath.startsWith("groups/")
+    : normalizedPath.startsWith("media/")
+        || normalizedPath.startsWith("groups/")
+        || normalizedPath.startsWith("workspaces/")
       ? resolve(rootDir, normalizedPath)
       : resolve(workingDirectory, normalizedPath);
 

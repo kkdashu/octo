@@ -6,6 +6,7 @@ import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { initDatabase } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { createOctoGroupExtension } from "../src/cli/octo-group-extension";
+import { WorkspaceService } from "../src/workspace-service";
 
 type RegisteredCommandMap = Map<
   string,
@@ -70,17 +71,29 @@ describe("octo group extension", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       const currentGroup = groupService.createCliGroup({ name: "Current" });
+      const currentWorkspace = workspaceService.getWorkspaceByFolder(currentGroup.folder);
+      if (!currentWorkspace) {
+        throw new Error("workspace missing");
+      }
+      const currentChat = workspaceService.listChats(currentWorkspace.id)[0];
+      if (!currentChat) {
+        throw new Error("chat missing");
+      }
       let switchedFolder: string | null = null;
       const runtimeHost = {
         getCurrentGroup: () => currentGroup,
-        switchGroup: async (group: { folder: string }) => {
-          switchedFolder = group.folder;
+        getCurrentWorkspace: () => currentWorkspace,
+        getCurrentChat: () => currentChat,
+        switchWorkspace: async (workspace: { folder: string }) => {
+          switchedFolder = workspace.folder;
           return { cancelled: false };
         },
       };
       const commands = registerExtension(createOctoGroupExtension({
         groupService,
+        workspaceService,
         getRuntimeHost: () => runtimeHost as never,
       }));
       const notices: string[] = [];
@@ -122,11 +135,17 @@ describe("octo group extension", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       const currentGroup = groupService.createCliGroup({ name: "Before" });
+      const currentWorkspace = workspaceService.getWorkspaceByFolder(currentGroup.folder);
+      if (!currentWorkspace) {
+        throw new Error("workspace missing");
+      }
       const commands = registerExtension(createOctoGroupExtension({
         groupService,
+        workspaceService,
         getRuntimeHost: () => ({
-          getCurrentGroup: () => currentGroup,
+          getCurrentWorkspace: () => currentWorkspace,
         }) as never,
       }));
       const command = commands.get("rename-group");
@@ -163,10 +182,12 @@ describe("octo group extension", () => {
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
       const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
       groupService.createCliGroup({ name: "Alpha" });
       const beta = groupService.createCliGroup({ name: "Beta" });
       const commands = registerExtension(createOctoGroupExtension({
         groupService,
+        workspaceService,
         getRuntimeHost: () => null,
       }));
       const command = commands.get("switch-group");
@@ -181,6 +202,68 @@ describe("octo group extension", () => {
           }),
         ]),
       );
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("new-chat creates a workspace chat and switches to it", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-group-extension-"));
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      const configPath = createProfilesConfig(rootDir);
+      process.env.AGENT_PROFILES_PATH = configPath;
+      const db = initDatabase(join(rootDir, "store", "messages.db"));
+      const groupService = new GroupService(db, { rootDir });
+      const workspaceService = new WorkspaceService(db, { rootDir });
+      const currentGroup = groupService.createCliGroup({ name: "Current" });
+      const currentWorkspace = workspaceService.getWorkspaceByFolder(currentGroup.folder);
+      if (!currentWorkspace) {
+        throw new Error("workspace missing");
+      }
+      const currentChat = workspaceService.listChats(currentWorkspace.id)[0];
+      if (!currentChat) {
+        throw new Error("chat missing");
+      }
+
+      let switchedChatId: string | null = null;
+      const commands = registerExtension(createOctoGroupExtension({
+        groupService,
+        workspaceService,
+        getRuntimeHost: () => ({
+          getCurrentGroup: () => currentGroup,
+          getCurrentWorkspace: () => currentWorkspace,
+          getCurrentChat: () => currentChat,
+          switchChat: async (chat: { id: string }) => {
+            switchedChatId = chat.id;
+            return { cancelled: false };
+          },
+        }) as never,
+      }));
+      const command = commands.get("new-chat");
+      if (!command) {
+        throw new Error("new-chat command was not registered");
+      }
+
+      await command.handler("Route B", {
+        waitForIdle: async () => {},
+        ui: {
+          input: async () => undefined,
+          select: async () => undefined,
+          notify: () => {},
+        },
+      });
+
+      const created = workspaceService.listChats(currentWorkspace.id)
+        .find((chat) => chat.title === "Route B");
+      expect(created).not.toBeUndefined();
+      expect(switchedChatId).toBe(created?.id);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

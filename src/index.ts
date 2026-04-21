@@ -1,8 +1,7 @@
 import {
-  getGroupByJid,
+  getGroupByFolder,
   initDatabase,
   insertMessage,
-  listGroups,
   registerGroup,
 } from "./db";
 import { ChannelManager } from "./channels/manager";
@@ -17,25 +16,20 @@ import { loadAgentProfilesConfig } from "./runtime/profile-config";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { log } from "./logger";
-import { setupGroupWorkspace } from "./group-workspace";
+import { WorkspaceService } from "./workspace-service";
 
 const TAG = "main";
 
-// ---------------------------------------------------------------------------
-// 1. Initialize database
-// ---------------------------------------------------------------------------
 log.info(TAG, "Initializing database at store/messages.db");
 const db = initDatabase("store/messages.db");
-log.info(TAG, "Database initialized successfully");
+const workspaceService = new WorkspaceService(db);
 
-// ---------------------------------------------------------------------------
-// 2. Create channel manager
-// ---------------------------------------------------------------------------
+for (const workspace of workspaceService.listWorkspaces()) {
+  workspaceService.ensureWorkspaceDirectory(workspace);
+}
+
 const channelManager = new ChannelManager(db);
 
-// ---------------------------------------------------------------------------
-// 3. Create and register Feishu channel
-// ---------------------------------------------------------------------------
 log.info(TAG, "Creating Feishu channel", {
   appId: process.env.FEISHU_APP_ID,
   port: process.env.PORT || 3000,
@@ -45,41 +39,44 @@ function getDefaultProfileKey(): string {
   return loadAgentProfilesConfig().defaultProfile;
 }
 
-function autoRegisterChat(chatId: string) {
-  if (getGroupByJid(db, chatId)) return; // already registered
+function ensureWorkspaceLegacyGroup(appId: string) {
+  const workspace = workspaceService.ensureFeishuWorkspace(appId, {
+    profileKey: getDefaultProfileKey(),
+  });
+  workspaceService.ensureWorkspaceDirectory(workspace);
 
-  const groups = listGroups(db);
-  const hasMain = groups.some((g) => g.is_main === 1);
-
-  if (!hasMain) {
-    // First group ever → register as main (no trigger required)
-    const folder = "main";
-    setupGroupWorkspace(folder, true);
+  if (!getGroupByFolder(db, workspace.folder)) {
     registerGroup(db, {
-      jid: chatId,
-      name: "Main (auto)",
-      folder,
+      jid: `feishu_app:${appId}`,
+      name: workspace.name,
+      folder: workspace.folder,
       channelType: "feishu",
       requiresTrigger: false,
-      isMain: true,
-      profileKey: getDefaultProfileKey(),
+      isMain: workspace.is_main === 1,
+      profileKey: workspace.profile_key,
     });
-    log.info(TAG, `Auto-registered as MAIN group: ${chatId} → groups/${folder}`);
-  } else {
-    // Subsequent groups → register as regular (trigger required)
-    const folder = `feishu_${chatId}`;
-    setupGroupWorkspace(folder, false);
-    registerGroup(db, {
-      jid: chatId,
-      name: `Auto (${chatId})`,
-      folder,
-      channelType: "feishu",
-      requiresTrigger: true,
-      isMain: false,
-      profileKey: getDefaultProfileKey(),
-    });
-    log.info(TAG, `Auto-registered as regular group: ${chatId} → groups/${folder}`);
   }
+
+  return workspace;
+}
+
+function ensureFeishuChatBinding(chatId: string) {
+  const appId = process.env.FEISHU_APP_ID?.trim();
+  if (!appId) {
+    throw new Error("FEISHU_APP_ID is required");
+  }
+
+  const workspace = ensureWorkspaceLegacyGroup(appId);
+  const isMainChat = process.env.MAIN_GROUP_CHAT_ID?.trim() === chatId;
+  const chat = workspaceService.ensureFeishuChat(workspace.id, chatId, {
+    title: isMainChat ? "Main" : `Auto (${chatId})`,
+    requiresTrigger: !isMainChat,
+  });
+
+  workspaceService.updateChat(chat.id, {
+    title: isMainChat ? "Main" : chat.title,
+    requiresTrigger: !isMainChat,
+  });
 }
 
 const feishu = new FeishuChannel(
@@ -93,56 +90,29 @@ const feishu = new FeishuChannel(
   },
   {
     onMessage: (_channel, message) => {
-      log.info(TAG, "onMessage callback: inserting message into database", {
-        id: message.id,
-        chatId: message.chatId,
-        sender: message.sender,
-        senderName: message.senderName,
-        content: message.content,
-        timestamp: message.timestamp,
-        mentionsMe: message.mentionsMe,
-      });
       insertMessage(db, message);
-      log.debug(TAG, "Message inserted into database successfully");
-
-      // Auto-register unregistered chats
-      autoRegisterChat(message.chatId);
+      ensureFeishuChatBinding(message.chatId);
     },
   },
 );
 channelManager.register(feishu);
 
-// ---------------------------------------------------------------------------
-// 4. Ensure main group directory and registration
-// ---------------------------------------------------------------------------
-setupGroupWorkspace("main", true);
-
-const mainChatId = process.env.MAIN_GROUP_CHAT_ID;
-if (mainChatId && !getGroupByJid(db, mainChatId)) {
-  registerGroup(db, {
-    jid: mainChatId,
-    name: "Main",
-    folder: "main",
-    channelType: "feishu",
-    requiresTrigger: false,
-    isMain: true,
-    profileKey: getDefaultProfileKey(),
-  });
-  log.info(TAG, `Main group registered: ${mainChatId}`);
-} else if (mainChatId) {
-  log.info(TAG, `Main group already registered: ${mainChatId}`);
-} else {
-  log.warn(TAG, "MAIN_GROUP_CHAT_ID not set, will auto-register on first message");
+const appId = process.env.FEISHU_APP_ID?.trim();
+if (appId) {
+  const workspace = ensureWorkspaceLegacyGroup(appId);
+  const mainChatId = process.env.MAIN_GROUP_CHAT_ID?.trim();
+  if (mainChatId) {
+    const chat = workspaceService.ensureFeishuChat(workspace.id, mainChatId, {
+      title: "Main",
+      requiresTrigger: false,
+    });
+    workspaceService.updateChat(chat.id, {
+      title: "Main",
+      requiresTrigger: false,
+    });
+  }
 }
 
-// Ensure all registered groups have AGENTS.md and system skills
-for (const group of listGroups(db)) {
-  setupGroupWorkspace(group.folder, group.is_main === 1);
-}
-
-// ---------------------------------------------------------------------------
-// 5. Build shared Pi-native group runtime host
-// ---------------------------------------------------------------------------
 const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
 if (!minimaxTokenPlanConfig.apiKey) {
   log.warn(TAG, "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders");
@@ -154,16 +124,13 @@ const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
 });
 const groupQueue = new FeishuGroupAdapter({
   db,
+  workspaceService,
   channelManager,
   imageMessagePreprocessor,
 });
-log.info(TAG, "Shared Pi-native group runtime host initialized");
 
-// ---------------------------------------------------------------------------
-// 6. Start channels, message loop, and scheduler
-// ---------------------------------------------------------------------------
 await channelManager.startAll();
-startMessageLoop(db, channelManager, groupQueue);
+startMessageLoop(db, channelManager, groupQueue, workspaceService);
 startScheduler(db, channelManager, groupQueue);
 
 log.info(TAG, `=== Octo started on port ${process.env.PORT || 3000} ===`);

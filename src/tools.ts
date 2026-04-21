@@ -26,6 +26,7 @@ import {
   MINIMAX_IMAGE_ASPECT_RATIOS,
   MINIMAX_IMAGE_MODELS,
 } from "./runtime/minimax-image";
+import { getWorkspaceDirectory } from "./group-workspace";
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 import { log } from "./logger";
@@ -270,7 +271,7 @@ export function createGroupToolDefs(
           return { content: [{ type: "text", text: resolvedTarget.message }] };
         }
 
-        const groupWorkdir = resolve(root, "groups", groupFolder);
+        const groupWorkdir = getWorkspaceDirectory(groupFolder, { rootDir: root });
         const absoluteFilePath = resolve(groupWorkdir, args.filePath as string);
         const rel = relative(groupWorkdir, absoluteFilePath);
         const escaped = rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../");
@@ -344,7 +345,7 @@ export function createGroupToolDefs(
 
         try {
           const artifact = await generateMiniMaxImage({
-            groupWorkdir: resolve(root, "groups", groupFolder),
+            groupWorkdir: getWorkspaceDirectory(groupFolder, { rootDir: root }),
             prompt,
             model,
             aspectRatio,
@@ -660,7 +661,7 @@ export function createGroupToolDefs(
             if (descMatch?.[1]) description = descMatch[1].trim();
           }
           const installed = existsSync(
-            join(root, "groups", groupFolder, ".pi", "skills", name, "SKILL.md"),
+            join(getWorkspaceDirectory(groupFolder, { rootDir: root }), ".pi", "skills", name, "SKILL.md"),
           );
           skills.push({ name, description, installed });
         }
@@ -683,7 +684,12 @@ export function createGroupToolDefs(
           log.warn(TAG, `[install_curated_skill] Skill not found: ${args.skillName}`);
           return { content: [{ type: "text", text: `Skill not found: ${args.skillName}` }] };
         }
-        const dest = join(root, "groups", groupFolder, ".pi", "skills", args.skillName as string);
+        const dest = join(
+          getWorkspaceDirectory(groupFolder, { rootDir: root }),
+          ".pi",
+          "skills",
+          args.skillName as string,
+        );
         if (existsSync(join(dest, "SKILL.md"))) {
           log.info(TAG, `[install_curated_skill] Already installed: ${args.skillName}`);
           return { content: [{ type: "text", text: `Skill already installed: ${args.skillName}` }] };

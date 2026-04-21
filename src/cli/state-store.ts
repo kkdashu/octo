@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 interface CliStateData {
+  currentWorkspaceFolder?: string;
+  currentChatId?: string;
   currentGroupFolder?: string;
 }
 
@@ -13,12 +15,36 @@ export class CliStateStore {
 
   getCurrentGroupFolder(): string | null {
     const state = this.read();
-    return state.currentGroupFolder?.trim() || null;
+    return state.currentGroupFolder?.trim()
+      || state.currentWorkspaceFolder?.trim()
+      || null;
+  }
+
+  getCurrentWorkspaceFolder(): string | null {
+    const state = this.read();
+    return state.currentWorkspaceFolder?.trim()
+      || state.currentGroupFolder?.trim()
+      || null;
+  }
+
+  getCurrentChatId(): string | null {
+    const state = this.read();
+    return state.currentChatId?.trim() || null;
   }
 
   setCurrentGroupFolder(folder: string): void {
     const next: CliStateData = {
+      currentWorkspaceFolder: folder,
       currentGroupFolder: folder,
+    };
+    this.write(next);
+  }
+
+  setCurrentChat(chatId: string, workspaceFolder: string): void {
+    const next: CliStateData = {
+      currentChatId: chatId,
+      currentWorkspaceFolder: workspaceFolder,
+      currentGroupFolder: workspaceFolder,
     };
     this.write(next);
   }

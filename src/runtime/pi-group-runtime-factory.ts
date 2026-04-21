@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   AgentSessionRuntime,
   AuthStorage,
@@ -31,6 +31,7 @@ import {
   saveSessionRef,
   type RegisteredGroup,
 } from "../db";
+import { getWorkspaceDirectory } from "../group-workspace";
 import { createPiMcpExtensionBundle } from "../providers/pi-mcp-extension";
 import {
   createPiSessionManager,
@@ -120,7 +121,7 @@ export function getGroupFolderFromWorkingDirectory(
   workingDirectory: string,
   rootDir = process.cwd(),
 ): string | null {
-  const groupsRoot = resolve(rootDir, "groups");
+  const groupsRoot = resolve(rootDir, "workspaces");
   const rel = relative(groupsRoot, resolve(workingDirectory));
   if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../")) {
     return null;
@@ -147,20 +148,37 @@ export function resolveGroupSessionRef(
   db: Database,
   groupFolder: string,
   workingDirectory: string,
+  options?: {
+    sessionRefOverride?: string | null;
+    persistResolvedRef?: boolean;
+  },
 ): string {
-  const persistedSessionRef = getSessionRef(db, groupFolder);
+  const persistResolvedRef = options?.persistResolvedRef ?? true;
+  const persistedSessionRef = options?.sessionRefOverride ?? getSessionRef(db, groupFolder);
   const resolvedPersistedSessionRef = resolvePersistedPiSessionRef(
     workingDirectory,
     persistedSessionRef,
   );
 
-  if (persistedSessionRef && !resolvedPersistedSessionRef) {
+  if (
+    persistedSessionRef
+    && !resolvedPersistedSessionRef
+    && options?.sessionRefOverride == null
+  ) {
     deleteSessionRef(db, groupFolder);
   }
 
   if (resolvedPersistedSessionRef) {
-    saveSessionRef(db, groupFolder, resolvedPersistedSessionRef);
+    if (persistResolvedRef && options?.sessionRefOverride == null) {
+      saveSessionRef(db, groupFolder, resolvedPersistedSessionRef);
+    }
     return resolvedPersistedSessionRef;
+  }
+
+  if (persistedSessionRef && options?.sessionRefOverride != null) {
+    return isAbsolute(persistedSessionRef)
+      ? persistedSessionRef
+      : resolve(workingDirectory, persistedSessionRef);
   }
 
   const sessionManager = SessionManager.continueRecent(
@@ -168,7 +186,9 @@ export function resolveGroupSessionRef(
     ensurePiSessionDir(workingDirectory),
   );
   const sessionRef = getPiSessionRef(sessionManager);
-  saveSessionRef(db, groupFolder, sessionRef);
+  if (persistResolvedRef && options?.sessionRefOverride == null) {
+    saveSessionRef(db, groupFolder, sessionRef);
+  }
   return sessionRef;
 }
 
@@ -280,6 +300,8 @@ export async function createPiGroupRuntime(
   options: CreatePiGroupRuntimeFactoryOptions & {
     groupFolder: string;
     agentDir?: string;
+    sessionRefOverride?: string | null;
+    persistSessionRef?: boolean;
   },
 ): Promise<{
   runtime: AgentSessionRuntime;
@@ -292,11 +314,15 @@ export async function createPiGroupRuntime(
     throw new Error(`Group not found: ${options.groupFolder}`);
   }
 
-  const workingDirectory = resolve(rootDir, "groups", group.folder);
+  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
   const sessionRef = resolveGroupSessionRef(
     options.db,
     group.folder,
     workingDirectory,
+    {
+      sessionRefOverride: options.sessionRefOverride,
+      persistResolvedRef: options.persistSessionRef ?? true,
+    },
   );
   const sessionManager = createPiSessionManager(workingDirectory, sessionRef);
   const runtime = await createAgentSessionRuntime(
@@ -308,7 +334,9 @@ export async function createPiGroupRuntime(
     },
   );
 
-  saveSessionRef(options.db, group.folder, runtime.session.sessionFile ?? sessionRef);
+  if (options.persistSessionRef ?? true) {
+    saveSessionRef(options.db, group.folder, runtime.session.sessionFile ?? sessionRef);
+  }
 
   return {
     runtime,
@@ -322,6 +350,8 @@ export async function createPiGroupSessionHost(
     groupFolder: string;
     agentDir?: string;
     sessionStartEvent?: SessionStartEvent;
+    sessionRefOverride?: string | null;
+    persistSessionRef?: boolean;
   },
 ): Promise<{
   host: PiGroupSessionHost;
@@ -334,11 +364,15 @@ export async function createPiGroupSessionHost(
     throw new Error(`Group not found: ${options.groupFolder}`);
   }
 
-  const workingDirectory = resolve(rootDir, "groups", group.folder);
+  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
   const sessionRef = resolveGroupSessionRef(
     options.db,
     group.folder,
     workingDirectory,
+    {
+      sessionRefOverride: options.sessionRefOverride,
+      persistResolvedRef: options.persistSessionRef ?? true,
+    },
   );
   const sessionManager = createPiSessionManager(workingDirectory, sessionRef);
   const createRuntime = createPiGroupRuntimeFactory(options);
@@ -350,7 +384,9 @@ export async function createPiGroupSessionHost(
   });
   const resolvedSessionRef = created.session.sessionFile ?? sessionRef;
 
-  saveSessionRef(options.db, group.folder, resolvedSessionRef);
+  if (options.persistSessionRef ?? true) {
+    saveSessionRef(options.db, group.folder, resolvedSessionRef);
+  }
 
   return {
     host: {

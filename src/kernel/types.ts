@@ -1,6 +1,6 @@
 import type { AgentSessionRuntime } from "@mariozechner/pi-coding-agent";
 import type { ConversationMessageInput } from "../providers/types";
-import type { RegisteredGroup } from "../db";
+import type { ChatRow, RegisteredGroup, WorkspaceRow } from "../db";
 
 export type RuntimeRenderableBlock =
   | { type: "text"; text: string }
@@ -42,27 +42,43 @@ export interface RuntimeRenderableMessage {
 }
 
 export interface GroupRuntimeSnapshot {
-  groupFolder: string;
-  groupName: string;
+  workspaceId: string;
+  workspaceFolder: string;
+  workspaceName: string;
+  chatId: string;
+  chatTitle: string;
+  activeBranch: string;
   profileKey: string;
   sessionRef: string | null;
+  currentRunId: string | null;
   isStreaming: boolean;
   pendingFollowUp: string[];
   pendingSteering: string[];
   messages: RuntimeRenderableMessage[];
+  groupFolder: string;
+  groupName: string;
 }
 
 export interface GroupRuntimeSummary {
-  folder: string;
-  name: string;
-  channelType: RegisteredGroup["channel_type"];
+  workspaceId: string;
+  workspaceFolder: string;
+  workspaceName: string;
+  chatId: string;
+  chatTitle: string;
+  activeBranch: string;
+  channelType: string;
   isMain: boolean;
   profileKey: string;
   sessionRef: string | null;
   isStreaming: boolean;
+  folder: string;
+  name: string;
 }
 
 export interface CreateCliGroupResult {
+  workspace: WorkspaceRow;
+  chat: ChatRow;
+  summary: GroupRuntimeSummary;
   group: GroupRuntimeSummary;
   snapshot: GroupRuntimeSnapshot;
 }
@@ -86,72 +102,75 @@ export type RuntimeMessageDelta =
       argsText: string;
     };
 
+type RuntimeEventBase = {
+  workspaceId: string;
+  workspaceFolder: string;
+  chatId: string;
+  groupFolder: string;
+  runId: string | null;
+};
+
 export type GroupRuntimeEvent =
   | { type: "snapshot"; snapshot: GroupRuntimeSnapshot }
-  | {
+  | (RuntimeEventBase & {
       type: "message_start";
-      groupFolder: string;
       message: RuntimeRenderableMessage;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "message_delta";
-      groupFolder: string;
       message: RuntimeRenderableMessage;
       delta: RuntimeMessageDelta;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "message_end";
-      groupFolder: string;
       message: RuntimeRenderableMessage;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "tool_start";
-      groupFolder: string;
       toolCallId: string;
       toolName: string;
       argsText: string;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "tool_update";
-      groupFolder: string;
       toolCallId: string;
       toolName: string;
       partialResultText: string;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "tool_end";
-      groupFolder: string;
       toolCallId: string;
       toolName: string;
       resultText: string;
       isError: boolean;
-    }
-  | {
+    })
+  | (RuntimeEventBase & {
       type: "queue_update";
-      groupFolder: string;
       steering: string[];
       followUp: string[];
-    }
-  | { type: "agent_end"; groupFolder: string }
-  | { type: "error"; groupFolder: string; message: string };
+    })
+  | (RuntimeEventBase & { type: "agent_end" })
+  | (RuntimeEventBase & { type: "error"; message: string });
 
 export type GroupRuntimeListener = (event: GroupRuntimeEvent) => void;
 
 export interface GroupRuntimeOperationResult {
   cancelled: boolean;
-  group: RegisteredGroup;
+  group: RegisteredGroup | null;
+  workspace: WorkspaceRow;
+  chat: ChatRow;
   runtime: AgentSessionRuntime;
   snapshot: GroupRuntimeSnapshot;
 }
 
 export interface GroupRuntimeSnapshotController {
   listGroups(): GroupRuntimeSummary[];
-  getSnapshot(groupFolder: string): Promise<GroupRuntimeSnapshot>;
+  getSnapshot(chatId: string): Promise<GroupRuntimeSnapshot>;
   prompt(
-    groupFolder: string,
+    chatId: string,
     input: ConversationMessageInput,
   ): Promise<GroupRuntimeSnapshot>;
-  abort(groupFolder: string): Promise<GroupRuntimeSnapshot>;
-  newSession(groupFolder: string): Promise<GroupRuntimeSnapshot>;
-  subscribe(groupFolder: string, listener: GroupRuntimeListener): () => void;
+  abort(chatId: string): Promise<GroupRuntimeSnapshot>;
+  newSession(chatId: string): Promise<GroupRuntimeSnapshot>;
+  subscribe(chatId: string, listener: GroupRuntimeListener): () => void;
 }

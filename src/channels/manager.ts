@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Channel, ChatInfo } from "./types";
 import { getGroupByJid } from "../db";
+import { getWorkspaceDirectory } from "../group-workspace";
 import { log } from "../logger";
 import {
   normalizeLegacyImageSyntax,
@@ -65,7 +66,8 @@ export class ChannelManager {
 
     if (
       normalizedPath.startsWith("media/") ||
-      normalizedPath.startsWith("groups/")
+      normalizedPath.startsWith("groups/") ||
+      normalizedPath.startsWith("workspaces/")
     ) {
       return resolve(normalizedPath);
     }
@@ -75,7 +77,7 @@ export class ChannelManager {
       return resolve(normalizedPath);
     }
 
-    const groupWorkdir = resolve("groups", group.folder);
+    const groupWorkdir = getWorkspaceDirectory(group.folder);
     const resolvedPath = resolve(groupWorkdir, normalizedPath);
     if (isEscapedPath(groupWorkdir, resolvedPath)) {
       throw new Error(

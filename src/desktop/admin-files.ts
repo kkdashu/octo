@@ -12,6 +12,7 @@ import type {
   DesktopAdminDirectoryListingDto,
   DesktopAdminFileContentDto,
 } from "./admin-types";
+import { getWorkspaceDirectory } from "../group-workspace";
 
 export const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 
@@ -50,7 +51,7 @@ export function getGroupRoot(
   groupFolder: string,
   rootDir = process.cwd(),
 ): string {
-  return resolve(rootDir, "groups", groupFolder);
+  return getWorkspaceDirectory(groupFolder, { rootDir });
 }
 
 export function resolveGroupPath(

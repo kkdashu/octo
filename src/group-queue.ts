@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { resolve } from "node:path";
 import type { ChannelManager } from "./channels/manager";
 import { resolvePersistedPiSessionRef } from "./providers/pi-session-ref";
 import { loadAgentProfilesConfig, resolveAgentProfile } from "./runtime/profile-config";
@@ -24,6 +23,7 @@ import {
   saveSessionRef,
   type GroupMemoryRow,
 } from "./db";
+import { getWorkspaceDirectory } from "./group-workspace";
 import { createGroupToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
@@ -158,7 +158,7 @@ export class GroupQueue {
       };
       const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
       const persistedSessionRef = getSessionRef(this.db, groupFolder);
-      const workingDirectory = resolve("groups", groupFolder);
+      const workingDirectory = getWorkspaceDirectory(groupFolder);
       const resumeSessionRef = resolvePersistedPiSessionRef(
         workingDirectory,
         persistedSessionRef,
@@ -352,7 +352,7 @@ export class GroupQueue {
     const requestedProfileKey =
       group.profile_key || loadAgentProfilesConfig().defaultProfile;
     const profile = resolveAgentProfile(requestedProfileKey);
-    const workingDirectory = resolve("groups", groupFolder);
+    const workingDirectory = getWorkspaceDirectory(groupFolder);
     const persistedSessionRef = previousSessionRef;
     const resumeSessionRef = resolvePersistedPiSessionRef(
       workingDirectory,

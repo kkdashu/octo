@@ -180,7 +180,7 @@ describe("ChannelManager outgoing rich message handling", () => {
     expect(sentTexts).toEqual(["前文", "后文"]);
     expect(sentImages).toEqual(["/tmp/screen_final.png"]);
     expect(sentFiles).toEqual([
-      resolve("groups", "test-group", "artifacts/report.pdf"),
+      resolve("workspaces", "test-group", "artifacts/report.pdf"),
     ]);
   });
 
@@ -333,7 +333,7 @@ describe("ChannelManager outgoing rich message handling", () => {
     );
 
     expect(sentFiles).toEqual([
-      resolve("groups", "test-group", "artifacts/report.pdf"),
+      resolve("workspaces", "test-group", "artifacts/report.pdf"),
     ]);
     expect(sentTexts).toEqual([
       "前文",

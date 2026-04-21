@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 import { SessionManager } from "@mariozechner/pi-coding-agent";
@@ -33,9 +33,11 @@ export function createPiSessionManager(
   sessionRef?: string,
 ): SessionManager {
   const sessionDir = ensurePiSessionDir(workingDirectory);
-  return sessionRef
+  const manager = sessionRef
     ? SessionManager.open(sessionRef, sessionDir, workingDirectory)
     : SessionManager.create(workingDirectory, sessionDir);
+  materializePiSessionRef(manager);
+  return manager;
 }
 
 export function getPiSessionRef(sessionManager: SessionManager): string {
@@ -43,5 +45,25 @@ export function getPiSessionRef(sessionManager: SessionManager): string {
   if (!sessionRef) {
     throw new Error("Pi session manager did not produce a session file");
   }
+  return sessionRef;
+}
+
+export function materializePiSessionRef(
+  sessionManager: SessionManager,
+): string {
+  const sessionRef = getPiSessionRef(sessionManager);
+  if (existsSync(sessionRef)) {
+    return sessionRef;
+  }
+
+  const header = sessionManager.getHeader();
+  if (!header) {
+    throw new Error("Pi session manager did not produce a session header");
+  }
+
+  const content = [header, ...sessionManager.getEntries()]
+    .map((entry) => JSON.stringify(entry))
+    .join("\n");
+  writeFileSync(sessionRef, `${content}\n`);
   return sessionRef;
 }

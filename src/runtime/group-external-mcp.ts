@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { getWorkspaceDirectory } from "../group-workspace";
 import { resolveEnabledExternalMcpServers } from "./external-mcp-config";
 
 const PDF_TO_MARKDOWN_SKILL_NAME = "pdf-to-markdown";
@@ -10,7 +11,13 @@ export function isGroupSkillInstalled(
   rootDir = process.cwd(),
 ): boolean {
   return existsSync(
-    resolve(rootDir, "groups", groupFolder, ".pi", "skills", skillName, "SKILL.md"),
+    resolve(
+      getWorkspaceDirectory(groupFolder, { rootDir }),
+      ".pi",
+      "skills",
+      skillName,
+      "SKILL.md",
+    ),
   );
 }
 

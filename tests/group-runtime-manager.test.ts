@@ -4,11 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSessionEvent, AgentSessionRuntime } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
-import { initDatabase, registerGroup } from "../src/db";
+import {
+  getWorkspaceRuntimeState,
+  initDatabase,
+  listRunEvents,
+  registerGroup,
+} from "../src/db";
 import { GroupService } from "../src/group-service";
+import { getWorkspaceDirectory } from "../src/group-workspace";
 import { GroupRuntimeManager } from "../src/kernel/group-runtime-manager";
 import type { GroupRuntimeEvent } from "../src/kernel/types";
 import type { MessageSender } from "../src/tools";
+import { createWorkspaceBranch } from "../src/workspace-git";
+import { WorkspaceService } from "../src/workspace-service";
 
 function createProfilesConfig(rootDir: string): string {
   const configPath = join(rootDir, "agent-profiles.json");
@@ -437,6 +445,168 @@ describe("GroupRuntimeManager", () => {
           text: "hello",
         },
       });
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(workspace.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("persists run lifecycle and idle unload state for chat runs", async () => {
+    const workspace = createWorkspace();
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      process.env.AGENT_PROFILES_PATH = workspace.configPath;
+      const group = workspace.groupService.getGroupByFolder("main");
+      if (!group) {
+        throw new Error("group missing");
+      }
+      workspace.groupService.ensureWorkspace(group);
+      const workspaceService = new WorkspaceService(workspace.db, {
+        rootDir: workspace.dir,
+      });
+      const workspaceRow = workspaceService.getWorkspaceByFolder("main");
+      if (!workspaceRow) {
+        throw new Error("workspace row missing");
+      }
+      const chat = workspaceService.listChats(workspaceRow.id)[0];
+      if (!chat) {
+        throw new Error("default chat missing");
+      }
+      const cwd = getWorkspaceDirectory("main", { rootDir: workspace.dir });
+      const fake = createFakeRuntime(cwd);
+      const manager = new GroupRuntimeManager({
+        db: workspace.db,
+        workspaceService,
+        rootDir: workspace.dir,
+        createMessageSender: () => createNoopMessageSender(),
+        createGroupRuntime: async () => ({
+          group,
+          runtime: fake.runtime,
+          sessionRef: fake.runtime.session.sessionFile!,
+        }),
+      });
+
+      await manager.prompt(chat.id, { mode: "prompt", text: "hello" });
+
+      const runningState = getWorkspaceRuntimeState(workspace.db, workspaceRow.id);
+      expect(runningState?.active_run_id).not.toBeNull();
+      expect(runningState?.status).toBe("running");
+      expect(runningState?.unload_after).toBeNull();
+
+      fake.emit({
+        type: "agent_end",
+        messages: [],
+      });
+
+      const idleState = getWorkspaceRuntimeState(workspace.db, workspaceRow.id);
+      expect(idleState?.active_run_id).toBeNull();
+      expect(idleState?.status).toBe("idle");
+      expect(idleState?.unload_after).not.toBeNull();
+
+      const runs = workspace.db
+        .query(
+          `SELECT id, trigger_source, status
+           FROM runs
+           WHERE chat_id = $chatId
+           ORDER BY started_at ASC`,
+        )
+        .all({ chatId: chat.id }) as Array<{
+          id: string;
+          trigger_source: string;
+          status: string;
+        }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({
+        trigger_source: "prompt",
+        status: "completed",
+      });
+      expect(listRunEvents(workspace.db, runs[0]!.id).map((event) => event.event_type)).toEqual([
+        "run_started",
+        "run_completed",
+      ]);
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(workspace.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("records branch switch operations as observable runs", async () => {
+    const workspace = createWorkspace();
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      process.env.AGENT_PROFILES_PATH = workspace.configPath;
+      const group = workspace.groupService.getGroupByFolder("main");
+      if (!group) {
+        throw new Error("group missing");
+      }
+      workspace.groupService.ensureWorkspace(group);
+      const workspaceService = new WorkspaceService(workspace.db, {
+        rootDir: workspace.dir,
+      });
+      const workspaceRow = workspaceService.getWorkspaceByFolder("main");
+      if (!workspaceRow) {
+        throw new Error("workspace row missing");
+      }
+      const chat = workspaceService.listChats(workspaceRow.id)[0];
+      if (!chat) {
+        throw new Error("default chat missing");
+      }
+      const cwd = getWorkspaceDirectory("main", { rootDir: workspace.dir });
+      createWorkspaceBranch(cwd, "feature", "main");
+      const fake = createFakeRuntime(cwd);
+      const manager = new GroupRuntimeManager({
+        db: workspace.db,
+        workspaceService,
+        rootDir: workspace.dir,
+        createMessageSender: () => createNoopMessageSender(),
+        createGroupRuntime: async () => ({
+          group,
+          runtime: fake.runtime,
+          sessionRef: fake.runtime.session.sessionFile!,
+        }),
+      });
+
+      const snapshot = await manager.switchBranch(chat.id, "feature", {
+        confirm: true,
+      });
+
+      expect(snapshot.activeBranch).toBe("feature");
+      const runtimeState = getWorkspaceRuntimeState(workspace.db, workspaceRow.id);
+      expect(runtimeState?.checked_out_branch).toBe("feature");
+      expect(runtimeState?.unload_after).not.toBeNull();
+
+      const runs = workspace.db
+        .query(
+          `SELECT id, trigger_source, status
+           FROM runs
+           WHERE chat_id = $chatId
+           ORDER BY started_at ASC`,
+        )
+        .all({ chatId: chat.id }) as Array<{
+          id: string;
+          trigger_source: string;
+          status: string;
+        }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({
+        trigger_source: "branch_switch",
+        status: "completed",
+      });
+      expect(listRunEvents(workspace.db, runs[0]!.id).map((event) => event.event_type)).toEqual([
+        "run_started",
+        "branch_switched",
+        "run_completed",
+      ]);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

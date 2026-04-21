@@ -10,6 +10,7 @@ import { initDatabase } from "../db";
 import { GroupService } from "../group-service";
 import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
 import { log } from "../logger";
+import { WorkspaceService } from "../workspace-service";
 
 const TAG = "desktop-main";
 
@@ -24,6 +25,7 @@ export interface DesktopSidecarHandle {
   rootDir: string;
   db: Database;
   groupService: GroupService;
+  workspaceService: WorkspaceService;
   channelManager: ChannelManager;
   manager: GroupRuntimeManager;
   api: DesktopApiRouter;
@@ -95,6 +97,7 @@ export async function startDesktopSidecar(
 
   const db = initDatabase(dbPath);
   const groupService = new GroupService(db, { rootDir });
+  const workspaceService = new WorkspaceService(db, { rootDir });
   for (const group of groupService.listGroups()) {
     groupService.ensureWorkspace(group);
   }
@@ -104,13 +107,14 @@ export async function startDesktopSidecar(
 
   const manager = new GroupRuntimeManager({
     db,
-    groupService,
+    workspaceService,
     rootDir,
     createMessageSender: createCliMessageSender(db, channelManager),
   });
 
   const api = createDesktopApiRouter(manager, {
-    createCliGroup: async ({ name }) => {
+    workspaceService,
+    createCliWorkspace: async ({ name }) => {
       const created = groupService.createCliGroup({
         name,
       });
@@ -119,14 +123,24 @@ export async function startDesktopSidecar(
         name: created.name,
         profileKey: created.profile_key,
       });
-      const group = manager.listGroups().find((item) => item.folder === created.folder);
-      if (!group) {
-        throw new Error(`Failed to expose newly created CLI group: ${created.folder}`);
+      const workspace = workspaceService.getWorkspaceByFolder(created.folder);
+      if (!workspace) {
+        throw new Error(`Failed to expose newly created workspace: ${created.folder}`);
       }
-
-      const snapshot = await manager.getSnapshot(created.folder);
+      const chat = workspaceService.listChats(workspace.id)[0] ?? null;
+      if (!chat) {
+        throw new Error(`Failed to expose newly created chat: ${created.folder}`);
+      }
+      const summary = manager.listGroups().find((item) => item.chatId === chat.id);
+      if (!summary) {
+        throw new Error(`Failed to expose newly created chat summary: ${chat.id}`);
+      }
+      const snapshot = await manager.getSnapshot(chat.id);
       return {
-        group,
+        workspace,
+        chat,
+        summary,
+        group: summary,
         snapshot,
       };
     },
@@ -144,6 +158,7 @@ export async function startDesktopSidecar(
     rootDir,
     db,
     groupService,
+    workspaceService,
     channelManager,
     manager,
     api,

@@ -1,29 +1,31 @@
 # Octo
 
-Octo 是一个面向飞书群的多群 AI Agent 编排系统。当前版本已经完全切到 Pi-native runtime：底层统一由 `PiProvider` 驱动，群组间通过 `profile_key` 选择模型线路，群工作区统一采用 `AGENTS.md + .pi/skills + .pi/sessions`。
+Octo 现在的一等模型是 `Workspace / Chat / Run`，不再把“外部群聊、工作目录、对话窗口”混成一个 `group`。当前版本已经切到 Pi-native runtime：底层统一由 `PiProvider` 驱动，Workspace 共享 `AGENTS.md + .pi/skills + .pi/sessions`，每个 Chat 持有自己的 `session_ref` 和 active branch。
 
 ## 特性
 
-- Pi-native runtime：所有群组都走同一条 `PiProvider` 链路
-- 多 profile 路由：通过配置文件切到不同模型和上游接口
-- 多群隔离：每个群有独立工作目录、独立 session ref、独立技能目录
-- 外部 MCP 扩展：按群技能 gate，再通过 Pi extension 注入
+- Workspace / Chat 模型：同一 Workspace 下可以有多个 Chat，共享目录、技能和长期约束
+- Pi-native runtime：所有入口都走同一条 `PiProvider` 链路
+- Chat 级 session 恢复：每个 Chat 独立保存 `session_ref`
+- Run 持久化：运行状态、事件流和 workspace runtime state 都会落库
+- Branch 能力：Chat 默认绑定 `workspace.default_branch`，支持显式切换与 fork
+- 外部 MCP 扩展：按 Workspace 技能 gate，再通过 Pi extension 注入
 - MiniMax 能力：统一图片理解预处理，支持文生图落盘后回传
-- 群级长期记忆：数据库持久化，自动注入新会话和定时任务
-- 定时任务：按群独立调度，支持跨群任务创建
+- Workspace 级长期记忆：数据库持久化，自动注入新会话和定时任务
 
 ## 架构
 
 ```text
-飞书群消息
-  → Channel / Router
-    → GroupQueue
-      → resolveAgentProfile(group.profile_key)
-      → PiProvider
-        → pi-mono coding-agent
-          → builtin tools
-          → octo custom tools
-          → Pi MCP extensions
+飞书 / CLI / Desktop 消息
+  → Channel / Router / Sidecar API
+    → Workspace / Chat 绑定
+      → GroupRuntimeManager
+        → resolveAgentProfile(workspace.profile_key)
+        → PiProvider
+          → pi-mono coding-agent
+            → builtin tools
+            → octo custom tools
+            → Pi MCP extensions
 ```
 
 ## 快速开始
@@ -50,19 +52,24 @@ Profile 配置文件按以下顺序加载：
 
 ## 工作区约定
 
-每个群目录统一为：
+每个 Workspace 目录统一为：
 
 ```text
-groups/<folder>/
+workspaces/<folder>/
   AGENTS.md
   .pi/
     skills/
     sessions/
 ```
 
-- `AGENTS.md`：该群指令文件
-- `.pi/skills/`：该群技能目录
-- `.pi/sessions/`：Pi 本地 session 文件
+- `AGENTS.md`：Workspace 指令文件
+- `.pi/skills/`：Workspace 共享技能目录
+- `.pi/sessions/`：Pi 本地 session 文件，多个 Chat 会引用其中不同 session
+
+兼容层仍然保留：
+
+- legacy `groups/<folder>/` 会尽量迁移或软链接到 `workspaces/<folder>/`
+- legacy `registered_groups` / `sessions` / `group_memories` 继续保留，用于兼容旧入口和旧工具
 
 启动时会自动做一次轻量迁移辅助：
 
@@ -73,21 +80,24 @@ groups/<folder>/
 
 ## 数据模型
 
-核心字段已经切换为 Pi-first 语义：
+核心字段已经切换为 Workspace / Chat 语义：
 
-- `registered_groups.profile_key`：当前群使用的模型线路 key
-- `sessions.session_ref`：Pi 本地 session 文件引用
+- `workspaces.default_branch`：Workspace 默认 branch
+- `chats.session_ref`：Chat 当前绑定的 Pi session 文件
+- `runs` / `run_events`：Chat 级运行记录与可观测事件
+- `workspace_runtime_state`：当前 checkout branch、active run、最近活动时间
 
 这意味着：
 
-- 切 profile 使用 `switch_profile`
-- 清上下文使用 `clear_session`
-- 切 profile 不会隐式删除 session ref
+- 切 profile 作用在 Workspace
+- 清上下文作用在当前 Chat
+- branch 切换需要显式确认
+- 同一 Workspace 一期仍然只允许一个 active run
 
 如需直接修改数据库：
 
 ```bash
-sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax-cn' WHERE folder = 'main';"
+sqlite3 store/messages.db "UPDATE workspaces SET profile_key = 'minimax-cn' WHERE folder = 'main';"
 ```
 
 ## Profile 路由
@@ -103,16 +113,16 @@ sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax-c
 - `minimax-cn` 使用中国区 Anthropic 兼容 endpoint 与 `MINIMAX_CN_API_KEY`
 - `codingPlanEnabled` 可用于区分普通 Kimi 与 coding plan 线路
 
-主群里可用的管理工具：
+主 Workspace 里可用的管理工具：
 
 - `list_profiles`
 - `switch_profile`
 - `list_groups`
 - `register_group`
 
-## 群记忆
+## Workspace 记忆
 
-群级长期记忆存储在 SQLite `group_memories` 表中，会在新会话启动时自动注入。
+长期记忆会迁移并收敛到 Workspace 级，运行时注入到新会话启动链路中。legacy `group_memories` 仍会同步到 `workspace_memories`。
 
 可用工具：
 
@@ -130,12 +140,12 @@ sqlite3 store/messages.db "UPDATE registered_groups SET profile_key = 'minimax-c
 
 ## Curated Skills 与外部 MCP
 
-系统技能和 curated skills 都会安装到群目录的 `.pi/skills/` 下。
+系统技能和 curated skills 都会安装到 Workspace 目录的 `.pi/skills/` 下。
 
 - `list_curated_skills`
 - `install_curated_skill`
 
-外部 MCP 通过 `config/external-mcp*.json` 配置，再由 `PiProvider` 在启动 session 时转成 Pi extension 注入。某些 MCP 能力可以再由群技能控制是否暴露，例如 `pdf-to-markdown`。
+外部 MCP 通过 `config/external-mcp*.json` 配置，再由 `PiProvider` 在启动 session 时转成 Pi extension 注入。某些 MCP 能力可以再由 Workspace 技能控制是否暴露，例如 `pdf-to-markdown`。
 
 ## 相关文档
 

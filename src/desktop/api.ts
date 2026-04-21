@@ -4,6 +4,7 @@ import type {
   GroupRuntimeSnapshotController,
 } from "../kernel/types";
 import { log } from "../logger";
+import { WorkspaceService } from "../workspace-service";
 
 type RouteRequest = Request & {
   params?: Record<string, string>;
@@ -11,16 +12,24 @@ type RouteRequest = Request & {
 
 export interface DesktopApiRouter {
   listGroups(req: Request): Response;
+  listWorkspaces(req: Request): Response;
   createCliGroup(req: Request): Promise<Response>;
+  createCliWorkspace(req: Request): Promise<Response>;
+  createChat(req: Request): Promise<Response>;
   getSnapshot(req: Request): Promise<Response>;
   prompt(req: Request): Promise<Response>;
   abort(req: Request): Promise<Response>;
   newSession(req: Request): Promise<Response>;
   getEvents(req: Request): Promise<Response>;
+  listBranches(req: Request): Promise<Response>;
+  switchBranch(req: Request): Promise<Response>;
+  forkBranch(req: Request): Promise<Response>;
 }
 
 export interface DesktopApiRouterOptions {
+  workspaceService?: WorkspaceService;
   createCliGroup?: (input: { name?: string }) => Promise<CreateCliGroupResult>;
+  createCliWorkspace?: (input: { name?: string }) => Promise<CreateCliGroupResult>;
 }
 
 const TAG = "desktop-api";
@@ -30,13 +39,30 @@ const promptSchema = z.object({
   mode: z.enum(["prompt", "follow_up", "steer"]).optional(),
 });
 
-const createCliGroupSchema = z.object({
+const createCliWorkspaceSchema = z.object({
   name: z.string().optional(),
 }).transform(({ name }) => {
   const normalizedName = name?.trim();
   return {
     name: normalizedName || undefined,
   };
+});
+
+const createChatSchema = z.object({
+  title: z.string().optional(),
+});
+
+const switchBranchSchema = z.object({
+  branch: z.string().trim().min(1, "branch 不能为空"),
+  confirm: z.boolean(),
+  allowDirty: z.boolean().optional(),
+});
+
+const forkBranchSchema = z.object({
+  branch: z.string().trim().min(1, "branch 不能为空"),
+  confirm: z.boolean(),
+  fromBranch: z.string().trim().optional(),
+  allowDirty: z.boolean().optional(),
 });
 
 function json(data: unknown, status = 200): Response {
@@ -99,13 +125,23 @@ function logRouteError(
   });
 }
 
-function getFolderParam(req: Request): string {
-  const folder = (req as RouteRequest).params?.folder;
-  if (!folder) {
-    throw new Error("Missing route param: folder");
+function getWorkspaceIdParam(req: Request): string {
+  const workspaceId = (req as RouteRequest).params?.workspaceId;
+  if (!workspaceId) {
+    throw new Error("Missing route param: workspaceId");
   }
 
-  return folder;
+  return workspaceId;
+}
+
+function getChatIdParam(req: Request): string {
+  const chatId = (req as RouteRequest).params?.chatId
+    ?? (req as RouteRequest).params?.folder;
+  if (!chatId) {
+    throw new Error("Missing route param: chatId");
+  }
+
+  return chatId;
 }
 
 function formatSseEvent(event: string, data: unknown): string {
@@ -118,10 +154,26 @@ function mapErrorStatus(error: unknown): number {
   }
 
   if (
-    error.message.startsWith("Group not found:")
+    error.message.startsWith("Workspace not found:")
+    || error.message.startsWith("Chat not found:")
     || error.message.startsWith("CLI group not found:")
   ) {
     return 404;
+  }
+
+  if (
+    error.message.startsWith("Branch not found:")
+    || error.message.includes("requires explicit confirmation")
+    || error.message.includes("group_not_found")
+  ) {
+    return 400;
+  }
+
+  if (
+    error.message.includes("active run")
+    || error.message.includes("uncommitted changes")
+  ) {
+    return 409;
   }
 
   return 500;
@@ -148,9 +200,35 @@ function toErrorResponse(error: unknown): Response {
 }
 
 export function createDesktopApiRouter(
-  manager: GroupRuntimeSnapshotController,
+  manager: GroupRuntimeSnapshotController & {
+    listBranches?: (chatId: string) => {
+      currentBranch: string;
+      branches: string[];
+      isDirty: boolean;
+    };
+    switchBranch?: (
+      chatId: string,
+      branch: string,
+      options: {
+        confirm: boolean;
+        allowDirty?: boolean;
+      },
+    ) => Promise<unknown>;
+    forkBranch?: (
+      chatId: string,
+      branch: string,
+      options: {
+        confirm: boolean;
+        fromBranch?: string;
+        allowDirty?: boolean;
+      },
+    ) => Promise<unknown>;
+  },
   options: DesktopApiRouterOptions = {},
 ): DesktopApiRouter {
+  const workspaceService = options.workspaceService;
+  const createCliWorkspace = options.createCliWorkspace ?? options.createCliGroup;
+
   return {
     listGroups() {
       return json({
@@ -158,19 +236,49 @@ export function createDesktopApiRouter(
       });
     },
 
-    async createCliGroup(req) {
+    listWorkspaces() {
+      if (!workspaceService) {
+        return json({
+          workspaces: [],
+        });
+      }
+      const summaries = manager.listGroups();
+      const summaryByChatId = new Map(summaries.map((summary) => [summary.chatId, summary]));
+      const workspaces = workspaceService.listWorkspaces().map((workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        folder: workspace.folder,
+        defaultBranch: workspace.default_branch,
+        profileKey: workspace.profile_key,
+        isMain: workspace.is_main === 1,
+        chats: workspaceService.listChats(workspace.id).map((chat) => {
+          const summary = summaryByChatId.get(chat.id);
+          return {
+            id: chat.id,
+            title: chat.title,
+            activeBranch: chat.active_branch,
+            sessionRef: chat.session_ref,
+            isStreaming: summary?.isStreaming ?? false,
+            lastActivityAt: chat.last_activity_at,
+          };
+        }),
+      }));
+
+      return json({ workspaces });
+    },
+
+    async createCliWorkspace(req) {
       let requestedName: string | null = null;
       try {
-        if (!options.createCliGroup) {
-          log.warn(TAG, "Desktop API createCliGroup is unavailable", getRequestMeta(req));
+        if (!createCliWorkspace) {
           return errorResponse(
             501,
             "not_implemented",
-            "createCliGroup is unavailable",
+            "createCliWorkspace is unavailable",
           );
         }
 
-        const body = createCliGroupSchema.parse(
+        const body = createCliWorkspaceSchema.parse(
           await req.json().catch(() => ({})),
         );
         requestedName = body.name ?? null;
@@ -178,13 +286,20 @@ export function createDesktopApiRouter(
           ...getRequestMeta(req),
           requestedName,
         });
-        const result = await options.createCliGroup(body);
+        const result = await createCliWorkspace(body);
+        const legacyGroup = (result as { group?: { folder: string; name: string } }).group;
+        const createdSummary = "summary" in result
+          ? result.summary
+          : {
+              folder: legacyGroup?.folder ?? "",
+              name: legacyGroup?.name ?? "",
+            };
         log.info(TAG, "Desktop createCliGroup succeeded", {
           ...getRequestMeta(req),
           requestedName,
           status: 201,
-          groupFolder: result.group.folder,
-          groupName: result.group.name,
+          groupFolder: createdSummary.folder,
+          groupName: createdSummary.name,
         });
         return json(result, 201);
       } catch (error) {
@@ -195,10 +310,33 @@ export function createDesktopApiRouter(
       }
     },
 
+    async createCliGroup(req) {
+      return this.createCliWorkspace(req);
+    },
+
+    async createChat(req) {
+      try {
+        if (!workspaceService) {
+          return errorResponse(501, "not_implemented", "workspaceService is unavailable");
+        }
+        const workspaceId = getWorkspaceIdParam(req);
+        const body = createChatSchema.parse(
+          await req.json().catch(() => ({})),
+        );
+        const chat = workspaceService.createChat(workspaceId, {
+          title: body.title?.trim() || undefined,
+        });
+        const snapshot = await manager.getSnapshot(chat.id);
+        return json({ chat, snapshot }, 201);
+      } catch (error) {
+        return toErrorResponse(error);
+      }
+    },
+
     async getSnapshot(req) {
       try {
-        const folder = getFolderParam(req);
-        const snapshot = await manager.getSnapshot(folder);
+        const chatId = getChatIdParam(req);
+        const snapshot = await manager.getSnapshot(chatId);
         return json(snapshot);
       } catch (error) {
         return toErrorResponse(error);
@@ -207,9 +345,9 @@ export function createDesktopApiRouter(
 
     async prompt(req) {
       try {
-        const folder = getFolderParam(req);
+        const chatId = getChatIdParam(req);
         const body = promptSchema.parse(await req.json());
-        const snapshot = await manager.prompt(folder, {
+        const snapshot = await manager.prompt(chatId, {
           text: body.text,
           mode: body.mode ?? "prompt",
         });
@@ -221,8 +359,8 @@ export function createDesktopApiRouter(
 
     async abort(req) {
       try {
-        const folder = getFolderParam(req);
-        const snapshot = await manager.abort(folder);
+        const chatId = getChatIdParam(req);
+        const snapshot = await manager.abort(chatId);
         return json(snapshot);
       } catch (error) {
         return toErrorResponse(error);
@@ -231,8 +369,8 @@ export function createDesktopApiRouter(
 
     async newSession(req) {
       try {
-        const folder = getFolderParam(req);
-        const snapshot = await manager.newSession(folder);
+        const chatId = getChatIdParam(req);
+        const snapshot = await manager.newSession(chatId);
         return json(snapshot);
       } catch (error) {
         return toErrorResponse(error);
@@ -241,8 +379,8 @@ export function createDesktopApiRouter(
 
     async getEvents(req) {
       try {
-        const folder = getFolderParam(req);
-        const initialSnapshot = await manager.getSnapshot(folder);
+        const chatId = getChatIdParam(req);
+        const initialSnapshot = await manager.getSnapshot(chatId);
         const encoder = new TextEncoder();
 
         let unsubscribe: () => void = () => undefined;
@@ -267,7 +405,7 @@ export function createDesktopApiRouter(
               })),
             );
 
-            unsubscribe = manager.subscribe(folder, (event) => {
+            unsubscribe = manager.subscribe(chatId, (event) => {
               if (closed) {
                 return;
               }
@@ -294,6 +432,53 @@ export function createDesktopApiRouter(
             "content-type": "text/event-stream",
           },
         });
+      } catch (error) {
+        return toErrorResponse(error);
+      }
+    },
+
+    async listBranches(req) {
+      try {
+        if (!manager.listBranches) {
+          return errorResponse(501, "not_implemented", "listBranches is unavailable");
+        }
+        const chatId = getChatIdParam(req);
+        return json(manager.listBranches(chatId));
+      } catch (error) {
+        return toErrorResponse(error);
+      }
+    },
+
+    async switchBranch(req) {
+      try {
+        if (!manager.switchBranch) {
+          return errorResponse(501, "not_implemented", "switchBranch is unavailable");
+        }
+        const chatId = getChatIdParam(req);
+        const body = switchBranchSchema.parse(await req.json());
+        const snapshot = await manager.switchBranch(chatId, body.branch, {
+          confirm: body.confirm,
+          allowDirty: body.allowDirty,
+        });
+        return json(snapshot);
+      } catch (error) {
+        return toErrorResponse(error);
+      }
+    },
+
+    async forkBranch(req) {
+      try {
+        if (!manager.forkBranch) {
+          return errorResponse(501, "not_implemented", "forkBranch is unavailable");
+        }
+        const chatId = getChatIdParam(req);
+        const body = forkBranchSchema.parse(await req.json());
+        const snapshot = await manager.forkBranch(chatId, body.branch, {
+          confirm: body.confirm,
+          fromBranch: body.fromBranch,
+          allowDirty: body.allowDirty,
+        });
+        return json(snapshot);
       } catch (error) {
         return toErrorResponse(error);
       }
