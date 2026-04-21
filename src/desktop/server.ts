@@ -66,106 +66,78 @@ export function startDesktopServer(options: {
         port,
         development: true,
         routes: {
-      "/api/desktop/groups": {
-        GET: (req) => withCors(req, options.api.listGroups(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/cli": {
-        POST: async (req) => withCors(req, await options.api.createCliGroup(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/:folder/snapshot": {
-        GET: async (req) => withCors(req, await options.api.getSnapshot(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/:folder/prompt": {
-        POST: async (req) => withCors(req, await options.api.prompt(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/:folder/abort": {
-        POST: async (req) => withCors(req, await options.api.abort(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/:folder/session/new": {
-        POST: async (req) => withCors(req, await options.api.newSession(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/groups/:folder/events": {
-        GET: async (req) => withCors(req, await options.api.getEvents(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces": {
-        GET: (req) => withCors(req, options.api.listWorkspaces(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/cli": {
-        POST: async (req) => withCors(req, await options.api.createCliWorkspace(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats": {
-        POST: async (req) => withCors(req, await options.api.createChat(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/snapshot": {
-        GET: async (req) => withCors(req, await options.api.getSnapshot(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/prompt": {
-        POST: async (req) => withCors(req, await options.api.prompt(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/abort": {
-        POST: async (req) => withCors(req, await options.api.abort(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/session/new": {
-        POST: async (req) => withCors(req, await options.api.newSession(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/events": {
-        GET: async (req) => withCors(req, await options.api.getEvents(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches": {
-        GET: async (req) => withCors(req, await options.api.listBranches(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches/switch": {
-        POST: async (req) => withCors(req, await options.api.switchBranch(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches/fork": {
-        POST: async (req) => withCors(req, await options.api.forkBranch(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups": {
-        GET: (req) => withCors(req, options.adminApi.listGroups(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups/:folder": {
-        GET: (req) => withCors(req, options.adminApi.getGroup(req)),
-        PATCH: async (req) => withCors(req, await options.adminApi.patchGroup(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups/:folder/memory": {
-        PUT: async (req) => withCors(req, await options.adminApi.putMemory(req)),
-        DELETE: (req) => withCors(req, options.adminApi.deleteMemory(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups/:folder/files": {
-        GET: (req) => withCors(req, options.adminApi.listFiles(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups/:folder/file": {
-        GET: (req) => withCors(req, options.adminApi.getFile(req)),
-        PUT: async (req) => withCors(req, await options.adminApi.putFile(req)),
-        POST: async (req) => withCors(req, await options.adminApi.postFile(req)),
-        OPTIONS: (req) => preflight(req),
-      },
-      "/api/desktop/admin/groups/:folder/folder": {
-        POST: async (req) => withCors(req, await options.adminApi.postFolder(req)),
-        OPTIONS: (req) => preflight(req),
-      },
+          "/api/desktop/workspaces": {
+            GET: (req) => withCors(req, options.api.listWorkspaces(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/cli": {
+            POST: async (req) => withCors(req, await options.api.createCliWorkspace(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats": {
+            POST: async (req) => withCors(req, await options.api.createChat(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/snapshot": {
+            GET: async (req) => withCors(req, await options.api.getSnapshot(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/prompt": {
+            POST: async (req) => withCors(req, await options.api.prompt(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/abort": {
+            POST: async (req) => withCors(req, await options.api.abort(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/session/new": {
+            POST: async (req) => withCors(req, await options.api.newSession(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/events": {
+            GET: async (req) => withCors(req, await options.api.getEvents(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches": {
+            GET: async (req) => withCors(req, await options.api.listBranches(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches/switch": {
+            POST: async (req) => withCors(req, await options.api.switchBranch(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/workspaces/:workspaceId/chats/:chatId/branches/fork": {
+            POST: async (req) => withCors(req, await options.api.forkBranch(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces": {
+            GET: (req) => withCors(req, options.adminApi.listWorkspaces(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces/:folder": {
+            GET: (req) => withCors(req, options.adminApi.getWorkspace(req)),
+            PATCH: async (req) => withCors(req, await options.adminApi.patchWorkspace(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces/:folder/memory": {
+            PUT: async (req) => withCors(req, await options.adminApi.putMemory(req)),
+            DELETE: (req) => withCors(req, options.adminApi.deleteMemory(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces/:folder/files": {
+            GET: (req) => withCors(req, options.adminApi.listFiles(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces/:folder/file": {
+            GET: (req) => withCors(req, options.adminApi.getFile(req)),
+            PUT: async (req) => withCors(req, await options.adminApi.putFile(req)),
+            POST: async (req) => withCors(req, await options.adminApi.postFile(req)),
+            OPTIONS: (req) => preflight(req),
+          },
+          "/api/desktop/admin/workspaces/:folder/folder": {
+            POST: async (req) => withCors(req, await options.adminApi.postFolder(req)),
+            OPTIONS: (req) => preflight(req),
+          },
         },
       });
 

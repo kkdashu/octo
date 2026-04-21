@@ -1,8 +1,6 @@
 import {
-  getGroupByFolder,
   initDatabase,
   insertMessage,
-  registerGroup,
 } from "./db";
 import { ChannelManager } from "./channels/manager";
 import { FeishuChannel } from "./channels/feishu";
@@ -39,43 +37,30 @@ function getDefaultProfileKey(): string {
   return loadAgentProfilesConfig().defaultProfile;
 }
 
-function ensureWorkspaceLegacyGroup(appId: string) {
-  const workspace = workspaceService.ensureFeishuWorkspace(appId, {
-    profileKey: getDefaultProfileKey(),
-  });
-  workspaceService.ensureWorkspaceDirectory(workspace);
-
-  if (!getGroupByFolder(db, workspace.folder)) {
-    registerGroup(db, {
-      jid: `feishu_app:${appId}`,
-      name: workspace.name,
-      folder: workspace.folder,
-      channelType: "feishu",
-      requiresTrigger: false,
-      isMain: workspace.is_main === 1,
-      profileKey: workspace.profile_key,
-    });
-  }
-
-  return workspace;
-}
-
-function ensureFeishuChatBinding(chatId: string) {
+function ensureFeishuRuntimeWorkspace() {
   const appId = process.env.FEISHU_APP_ID?.trim();
   if (!appId) {
     throw new Error("FEISHU_APP_ID is required");
   }
 
-  const workspace = ensureWorkspaceLegacyGroup(appId);
+  const workspace = workspaceService.ensureFeishuWorkspace(appId, {
+    profileKey: getDefaultProfileKey(),
+  });
+  workspaceService.ensureWorkspaceDirectory(workspace);
+  return workspace;
+}
+
+function ensureFeishuChatBinding(chatId: string) {
+  const workspace = ensureFeishuRuntimeWorkspace();
   const isMainChat = process.env.MAIN_GROUP_CHAT_ID?.trim() === chatId;
   const chat = workspaceService.ensureFeishuChat(workspace.id, chatId, {
     title: isMainChat ? "Main" : `Auto (${chatId})`,
-    requiresTrigger: !isMainChat,
+    requiresTrigger: false,
   });
 
   workspaceService.updateChat(chat.id, {
     title: isMainChat ? "Main" : chat.title,
-    requiresTrigger: !isMainChat,
+    requiresTrigger: false,
   });
 }
 
@@ -99,7 +84,7 @@ channelManager.register(feishu);
 
 const appId = process.env.FEISHU_APP_ID?.trim();
 if (appId) {
-  const workspace = ensureWorkspaceLegacyGroup(appId);
+  const workspace = ensureFeishuRuntimeWorkspace();
   const mainChatId = process.env.MAIN_GROUP_CHAT_ID?.trim();
   if (mainChatId) {
     const chat = workspaceService.ensureFeishuChat(workspace.id, mainChatId, {

@@ -5,13 +5,13 @@ import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
 import {
   getGroupByFolder,
-  getSessionRef,
   initDatabase,
   registerGroup,
 } from "../src/db";
 import { FeishuGroupAdapter } from "../src/runtime/feishu-group-adapter";
 import type { ImageMessagePreprocessor } from "../src/runtime/image-message-preprocessor";
 import type { PiGroupSessionHost } from "../src/runtime/pi-group-runtime-factory";
+import { WorkspaceService } from "../src/workspace-service";
 
 type FakeSessionEvent = {
   type: string;
@@ -50,6 +50,18 @@ function createWorkspace() {
       rmSync(dir, { recursive: true, force: true });
     },
   };
+}
+
+function getMainChatSessionRef(
+  db: ReturnType<typeof initDatabase>,
+  rootDir: string,
+): string | null {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  const workspace = workspaceService.getWorkspaceByFolder("main");
+  if (!workspace) {
+    throw new Error("workspace missing");
+  }
+  return workspaceService.listChats(workspace.id)[0]?.session_ref ?? null;
 }
 
 function createFakeChannelManager(sent: Array<{ chatJid: string; text: string }>) {
@@ -207,11 +219,12 @@ describe("FeishuGroupAdapter", () => {
     try {
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => `prepared:${text}`,
         createGroupSessionHost: async (groupFolder) => {
-          observedSessionRefs.push(getSessionRef(workspace.db, groupFolder));
+          observedSessionRefs.push(getMainChatSessionRef(workspace.db, workspace.dir));
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           createdHosts.push(fake);
           return {
@@ -244,7 +257,7 @@ describe("FeishuGroupAdapter", () => {
 
       expect(createdHosts).toHaveLength(2);
       expect(observedSessionRefs).toEqual([null, "session-1-done.jsonl"]);
-      expect(getSessionRef(workspace.db, "main")).toBe("session-1-done.jsonl");
+      expect(getMainChatSessionRef(workspace.db, workspace.dir)).toBe("session-1-done.jsonl");
       expect(sent).toEqual([
         { chatJid: "oc_main", text: "reply:prepared:hello" },
         { chatJid: "oc_main", text: "reply:prepared:next" },
@@ -254,7 +267,7 @@ describe("FeishuGroupAdapter", () => {
       await queuedTurn;
       await flushMicrotasks();
 
-      expect(getSessionRef(workspace.db, "main")).toBe("session-2-done.jsonl");
+      expect(getMainChatSessionRef(workspace.db, workspace.dir)).toBe("session-2-done.jsonl");
       expect(sent).toEqual([
         { chatJid: "oc_main", text: "reply:prepared:hello" },
         { chatJid: "oc_main", text: "reply:prepared:next" },
@@ -273,6 +286,7 @@ describe("FeishuGroupAdapter", () => {
     try {
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
@@ -303,7 +317,7 @@ describe("FeishuGroupAdapter", () => {
       });
       expect(createdHosts[0]?.aborted).toBe(true);
       expect(createdHosts[0]?.disposed).toBe(true);
-      expect(getSessionRef(workspace.db, "main")).toBe("fresh-session.jsonl");
+      expect(getMainChatSessionRef(workspace.db, workspace.dir)).toBe("fresh-session.jsonl");
     } finally {
       workspace.cleanup();
     }
@@ -317,6 +331,7 @@ describe("FeishuGroupAdapter", () => {
     try {
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
@@ -359,6 +374,7 @@ describe("FeishuGroupAdapter", () => {
     try {
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
@@ -403,6 +419,7 @@ describe("FeishuGroupAdapter", () => {
 
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => {
@@ -466,6 +483,7 @@ describe("FeishuGroupAdapter", () => {
     try {
       const adapter = new FeishuGroupAdapter({
         db: workspace.db,
+        rootDir: workspace.dir,
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,

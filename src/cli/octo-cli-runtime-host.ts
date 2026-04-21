@@ -6,7 +6,7 @@ import type {
   AgentSessionRuntimeDiagnostic,
   CreateAgentSessionRuntimeFactory,
 } from "@mariozechner/pi-coding-agent";
-import type { ChatRow, RegisteredGroup, WorkspaceRow } from "../db";
+import type { ChatRow, WorkspaceRow } from "../db";
 import { log } from "../logger";
 import { CliStateStore } from "./state-store";
 import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
@@ -16,11 +16,10 @@ export interface OctoCliRuntimeHostOptions {
   stateStore: CliStateStore;
   currentWorkspace: WorkspaceRow;
   currentChat: ChatRow;
-  currentGroup?: RegisteredGroup | null;
   runtime: AgentSessionRuntime;
 }
 
-type ExternalSwitchKind = "chat" | "workspace" | "group";
+type ExternalSwitchKind = "chat" | "workspace";
 
 const TAG = "octo-cli-runtime-host";
 
@@ -28,7 +27,6 @@ export interface OctoCliRuntimeSwitchEvent {
   kind: ExternalSwitchKind;
   workspace: WorkspaceRow;
   chat: ChatRow;
-  group: RegisteredGroup | null;
   runtime: AgentSessionRuntime;
 }
 
@@ -39,7 +37,6 @@ const unsupportedCreateRuntime: CreateAgentSessionRuntimeFactory = async () => {
 export class OctoCliRuntimeHost extends AgentSessionRuntime {
   private currentWorkspace: WorkspaceRow;
   private currentChat: ChatRow;
-  private currentGroup: RegisteredGroup | null;
   private currentRuntime: AgentSessionRuntime;
   private externalSwitchHandler:
     | ((event: OctoCliRuntimeSwitchEvent) => Promise<void> | void)
@@ -55,7 +52,6 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     );
     this.currentWorkspace = options.currentWorkspace;
     this.currentChat = options.currentChat;
-    this.currentGroup = options.currentGroup ?? null;
     this.currentRuntime = options.runtime;
     this.syncStateStore();
   }
@@ -94,20 +90,6 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     return this.currentChat;
   }
 
-  getCurrentGroup(): RegisteredGroup {
-    return this.currentGroup ?? {
-      jid: `workspace:${this.currentWorkspace.folder}`,
-      name: this.currentWorkspace.name,
-      folder: this.currentWorkspace.folder,
-      channel_type: "workspace",
-      trigger_pattern: this.currentChat.trigger_pattern,
-      added_at: this.currentWorkspace.created_at,
-      requires_trigger: this.currentChat.requires_trigger,
-      is_main: this.currentWorkspace.is_main,
-      profile_key: this.currentWorkspace.profile_key,
-    };
-  }
-
   override async newSession(options?: {
     parentSession?: string;
     setup?: Parameters<AgentSessionRuntime["newSession"]>[0] extends infer T
@@ -133,21 +115,6 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     return { cancelled: result.cancelled };
   }
 
-  override async switchSession(
-    sessionPath: string,
-    cwdOverride?: string,
-  ): Promise<{ cancelled: boolean }> {
-    const result = await this.options.manager.switchSession(
-      this.currentChat.id,
-      sessionPath,
-      cwdOverride,
-    );
-    if (!result.cancelled) {
-      this.applyResult(result);
-    }
-    return { cancelled: result.cancelled };
-  }
-
   async switchChat(chat: ChatRow): Promise<{ cancelled: boolean }> {
     log.info(TAG, "Switching CLI chat", {
       fromChatId: this.currentChat.id,
@@ -157,16 +124,7 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     const result = await this.options.manager.switchChat(chat.id);
     if (!result.cancelled) {
       this.applyResult(result);
-      log.info(TAG, "Switched CLI chat", {
-        chatId: this.currentChat.id,
-        workspaceFolder: this.currentWorkspace.folder,
-        sessionRef: this.currentChat.session_ref,
-      });
       await this.notifyExternalSwitch("chat");
-    } else {
-      log.info(TAG, "CLI chat switch cancelled", {
-        requestedChatId: chat.id,
-      });
     }
     return { cancelled: result.cancelled };
   }
@@ -175,49 +133,17 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     workspace: WorkspaceRow,
     chat?: ChatRow,
   ): Promise<{ cancelled: boolean }> {
-    log.info(TAG, "Switching CLI workspace", {
-      fromWorkspaceFolder: this.currentWorkspace.folder,
-      toWorkspaceFolder: workspace.folder,
-      requestedChatId: chat?.id ?? null,
-    });
-    const result = chat
-      ? await this.options.manager.switchChat(chat.id)
-      : await this.options.manager.switchGroup(workspace.folder);
+    const targetChatId = chat?.id ?? this.options.manager
+      .listChats()
+      .find((item) => item.workspaceId === workspace.id)?.chatId;
+    if (!targetChatId) {
+      throw new Error(`Workspace has no chat: ${workspace.id}`);
+    }
+
+    const result = await this.options.manager.switchChat(targetChatId);
     if (!result.cancelled) {
       this.applyResult(result);
-      log.info(TAG, "Switched CLI workspace", {
-        workspaceFolder: this.currentWorkspace.folder,
-        chatId: this.currentChat.id,
-        sessionRef: this.currentChat.session_ref,
-      });
       await this.notifyExternalSwitch("workspace");
-    } else {
-      log.info(TAG, "CLI workspace switch cancelled", {
-        requestedWorkspaceFolder: workspace.folder,
-        requestedChatId: chat?.id ?? null,
-      });
-    }
-    return { cancelled: result.cancelled };
-  }
-
-  async switchGroup(group: RegisteredGroup): Promise<{ cancelled: boolean }> {
-    log.info(TAG, "Switching CLI group", {
-      fromGroupFolder: this.currentGroup?.folder ?? this.currentWorkspace.folder,
-      toGroupFolder: group.folder,
-    });
-    const result = await this.options.manager.switchGroup(group.folder);
-    if (!result.cancelled) {
-      this.applyResult(result, group);
-      log.info(TAG, "Switched CLI group", {
-        groupFolder: this.currentGroup?.folder ?? this.currentWorkspace.folder,
-        chatId: this.currentChat.id,
-        sessionRef: this.currentChat.session_ref,
-      });
-      await this.notifyExternalSwitch("group");
-    } else {
-      log.info(TAG, "CLI group switch cancelled", {
-        requestedGroupFolder: group.folder,
-      });
     }
     return { cancelled: result.cancelled };
   }
@@ -241,11 +167,9 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
 
   private applyResult(
     result: Awaited<ReturnType<GroupRuntimeManager["switchChat"]>>,
-    fallbackGroup?: RegisteredGroup | null,
   ): void {
     this.currentWorkspace = result.workspace;
     this.currentChat = result.chat;
-    this.currentGroup = result.group ?? fallbackGroup ?? null;
     this.currentRuntime = result.runtime;
     this.syncStateStore();
   }
@@ -262,17 +186,10 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
   }
 
   private async notifyExternalSwitch(kind: ExternalSwitchKind): Promise<void> {
-    log.debug(TAG, "Notifying CLI external switch handler", {
-      kind,
-      workspaceFolder: this.currentWorkspace.folder,
-      chatId: this.currentChat.id,
-      groupFolder: this.currentGroup?.folder ?? null,
-    });
     await this.externalSwitchHandler?.({
       kind,
       workspace: this.currentWorkspace,
       chat: this.currentChat,
-      group: this.currentGroup,
       runtime: this.currentRuntime,
     });
   }

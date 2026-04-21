@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
 import {
-  getSessionRef,
   initDatabase,
   registerGroup,
-  saveSessionRef,
 } from "../src/db";
 import {
   GroupQueue,
@@ -20,6 +18,7 @@ import type {
   ResetSessionInput,
 } from "../src/providers/types";
 import { __test__ as externalMcpConfigTestHelpers } from "../src/runtime/external-mcp-config";
+import { WorkspaceService } from "../src/workspace-service";
 
 const originalEnv = { ...process.env };
 const originalCwd = process.cwd();
@@ -63,6 +62,37 @@ function createQueueWorkspace(tempDir: string) {
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
 
   return { db };
+}
+
+function updateChatSessionRef(
+  db: ReturnType<typeof initDatabase>,
+  rootDir: string,
+  folder: string,
+  sessionRef: string | null,
+): void {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  const workspace = workspaceService.getWorkspaceByFolder(folder);
+  if (!workspace) {
+    throw new Error(`Workspace missing for ${folder}`);
+  }
+  const chat = workspaceService.listChats(workspace.id)[0];
+  if (!chat) {
+    throw new Error(`Chat missing for ${folder}`);
+  }
+  workspaceService.updateChat(chat.id, { sessionRef });
+}
+
+function getChatSessionRef(
+  db: ReturnType<typeof initDatabase>,
+  rootDir: string,
+  folder: string,
+): string | null {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  const workspace = workspaceService.getWorkspaceByFolder(folder);
+  if (!workspace) {
+    throw new Error(`Workspace missing for ${folder}`);
+  }
+  return workspaceService.listChats(workspace.id)[0]?.session_ref ?? null;
 }
 
 function createFakeChannelManager(): ChannelManager {
@@ -254,7 +284,7 @@ describe("group queue Pi session ref lifecycle", () => {
     const sessionRef = join(tempDir, "groups", "main", ".pi", "sessions", "existing.jsonl");
     mkdirSync(join(tempDir, "groups", "main", ".pi", "sessions"), { recursive: true });
     writeFileSync(sessionRef, "");
-    saveSessionRef(db, "main", sessionRef);
+    updateChatSessionRef(db, tempDir, "main", sessionRef);
 
     const { runtime, opened } = createCapturingRuntime();
     const queue = new GroupQueue(db, createFakeChannelManager(), runtime, 1);
@@ -268,7 +298,7 @@ describe("group queue Pi session ref lifecycle", () => {
   test("drops stale Pi session refs before runtime.openConversation", async () => {
     const { db } = createQueueWorkspace(tempDir);
     const missingSessionRef = join(tempDir, "groups", "main", ".pi", "sessions", "missing.jsonl");
-    saveSessionRef(db, "main", missingSessionRef);
+    updateChatSessionRef(db, tempDir, "main", missingSessionRef);
 
     const { runtime, opened } = createCapturingRuntime();
     const queue = new GroupQueue(db, createFakeChannelManager(), runtime, 1);
@@ -277,7 +307,7 @@ describe("group queue Pi session ref lifecycle", () => {
 
     const config = await opened;
     expect(config.resumeSessionRef).toBeUndefined();
-    expect(getSessionRef(db, "main")).toBeNull();
+    expect(getChatSessionRef(db, tempDir, "main")).toBeNull();
   });
 
   test("clearSession resumes from an existing local Pi session ref", async () => {
@@ -285,7 +315,7 @@ describe("group queue Pi session ref lifecycle", () => {
     const sessionRef = join(tempDir, "groups", "main", ".pi", "sessions", "existing.jsonl");
     mkdirSync(join(tempDir, "groups", "main", ".pi", "sessions"), { recursive: true });
     writeFileSync(sessionRef, "");
-    saveSessionRef(db, "main", sessionRef);
+    updateChatSessionRef(db, tempDir, "main", sessionRef);
 
     const { runtime, reset } = createCapturingRuntime();
     const queue = new GroupQueue(db, createFakeChannelManager(), runtime, 1);
@@ -296,13 +326,13 @@ describe("group queue Pi session ref lifecycle", () => {
     expect(config.resumeSessionRef).toBe(sessionRef);
     expect(result.previousSessionRef).toBe(sessionRef);
     expect(result.sessionRef).toBe("fresh-session.jsonl");
-    expect(getSessionRef(db, "main")).toBe("fresh-session.jsonl");
+    expect(getChatSessionRef(db, tempDir, "main")).toBe("fresh-session.jsonl");
   });
 
   test("clearSession drops stale Pi session refs before creating a fresh one", async () => {
     const { db } = createQueueWorkspace(tempDir);
     const missingSessionRef = join(tempDir, "groups", "main", ".pi", "sessions", "missing.jsonl");
-    saveSessionRef(db, "main", missingSessionRef);
+    updateChatSessionRef(db, tempDir, "main", missingSessionRef);
 
     const { runtime, reset } = createCapturingRuntime();
     const queue = new GroupQueue(db, createFakeChannelManager(), runtime, 1);
@@ -313,6 +343,6 @@ describe("group queue Pi session ref lifecycle", () => {
     expect(config.resumeSessionRef).toBeUndefined();
     expect(result.previousSessionRef).toBe(missingSessionRef);
     expect(result.sessionRef).toBe("fresh-session.jsonl");
-    expect(getSessionRef(db, "main")).toBe("fresh-session.jsonl");
+    expect(getChatSessionRef(db, tempDir, "main")).toBe("fresh-session.jsonl");
   });
 });

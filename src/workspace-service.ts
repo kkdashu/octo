@@ -269,7 +269,7 @@ export class WorkspaceService {
 
     return this.createChat(workspaceId, {
       title: options?.title?.trim() || `Auto (${externalChatId})`,
-      requiresTrigger: options?.requiresTrigger ?? true,
+      requiresTrigger: options?.requiresTrigger ?? false,
       triggerPattern: options?.triggerPattern,
       externalBinding: {
         platform: "feishu",

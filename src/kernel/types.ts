@@ -1,6 +1,6 @@
 import type { AgentSessionRuntime } from "@mariozechner/pi-coding-agent";
 import type { ConversationMessageInput } from "../providers/types";
-import type { ChatRow, RegisteredGroup, WorkspaceRow } from "../db";
+import type { ChatRow, WorkspaceRow } from "../db";
 
 export type RuntimeRenderableBlock =
   | { type: "text"; text: string }
@@ -41,7 +41,7 @@ export interface RuntimeRenderableMessage {
   customType?: string;
 }
 
-export interface GroupRuntimeSnapshot {
+export interface RuntimeSnapshot {
   workspaceId: string;
   workspaceFolder: string;
   workspaceName: string;
@@ -55,32 +55,27 @@ export interface GroupRuntimeSnapshot {
   pendingFollowUp: string[];
   pendingSteering: string[];
   messages: RuntimeRenderableMessage[];
-  groupFolder: string;
-  groupName: string;
 }
 
-export interface GroupRuntimeSummary {
+export interface RuntimeSummary {
   workspaceId: string;
   workspaceFolder: string;
   workspaceName: string;
   chatId: string;
   chatTitle: string;
   activeBranch: string;
-  channelType: string;
+  platform: string;
   isMain: boolean;
   profileKey: string;
   sessionRef: string | null;
   isStreaming: boolean;
-  folder: string;
-  name: string;
 }
 
-export interface CreateCliGroupResult {
+export interface CreateCliWorkspaceResult {
   workspace: WorkspaceRow;
   chat: ChatRow;
-  summary: GroupRuntimeSummary;
-  group: GroupRuntimeSummary;
-  snapshot: GroupRuntimeSnapshot;
+  summary: RuntimeSummary;
+  snapshot: RuntimeSnapshot;
 }
 
 export type RuntimeMessageDelta =
@@ -106,12 +101,11 @@ type RuntimeEventBase = {
   workspaceId: string;
   workspaceFolder: string;
   chatId: string;
-  groupFolder: string;
   runId: string | null;
 };
 
-export type GroupRuntimeEvent =
-  | { type: "snapshot"; snapshot: GroupRuntimeSnapshot }
+export type RuntimeEvent =
+  | { type: "snapshot"; snapshot: RuntimeSnapshot }
   | (RuntimeEventBase & {
       type: "message_start";
       message: RuntimeRenderableMessage;
@@ -152,25 +146,24 @@ export type GroupRuntimeEvent =
   | (RuntimeEventBase & { type: "agent_end" })
   | (RuntimeEventBase & { type: "error"; message: string });
 
-export type GroupRuntimeListener = (event: GroupRuntimeEvent) => void;
+export type RuntimeListener = (event: RuntimeEvent) => void;
 
-export interface GroupRuntimeOperationResult {
+export interface RuntimeOperationResult {
   cancelled: boolean;
-  group: RegisteredGroup | null;
   workspace: WorkspaceRow;
   chat: ChatRow;
   runtime: AgentSessionRuntime;
-  snapshot: GroupRuntimeSnapshot;
+  snapshot: RuntimeSnapshot;
 }
 
-export interface GroupRuntimeSnapshotController {
-  listGroups(): GroupRuntimeSummary[];
-  getSnapshot(chatId: string): Promise<GroupRuntimeSnapshot>;
+export interface RuntimeSnapshotController {
+  listChats(): RuntimeSummary[];
+  getSnapshot(chatId: string): Promise<RuntimeSnapshot>;
   prompt(
     chatId: string,
     input: ConversationMessageInput,
-  ): Promise<GroupRuntimeSnapshot>;
-  abort(chatId: string): Promise<GroupRuntimeSnapshot>;
-  newSession(chatId: string): Promise<GroupRuntimeSnapshot>;
-  subscribe(chatId: string, listener: GroupRuntimeListener): () => void;
+  ): Promise<RuntimeSnapshot>;
+  abort(chatId: string): Promise<RuntimeSnapshot>;
+  newSession(chatId: string): Promise<RuntimeSnapshot>;
+  subscribe(chatId: string, listener: RuntimeListener): () => void;
 }

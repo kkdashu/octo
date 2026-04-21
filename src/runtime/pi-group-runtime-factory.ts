@@ -15,7 +15,6 @@ import {
   createWriteTool,
   getAgentDir,
   ModelRegistry,
-  SessionManager,
   type AgentSessionServices,
   type AgentSessionRuntimeDiagnostic,
   type CreateAgentSessionRuntimeFactory,
@@ -24,12 +23,12 @@ import {
   type SessionStartEvent,
 } from "@mariozechner/pi-coding-agent";
 import {
-  deleteSessionRef,
-  getGroupByFolder,
-  getSessionRef,
-  listGroupMemories,
-  saveSessionRef,
-  type RegisteredGroup,
+  getChatById,
+  getWorkspaceByFolder,
+  listWorkspaceMemories,
+  type ChatRow,
+  type WorkspaceMemoryRow,
+  type WorkspaceRow,
 } from "../db";
 import { getWorkspaceDirectory } from "../group-workspace";
 import { createPiMcpExtensionBundle } from "../providers/pi-mcp-extension";
@@ -41,9 +40,9 @@ import {
 } from "../providers/pi-session-ref";
 import { adaptOctoTools } from "../providers/pi-tool-adapter";
 import type { MessageSender } from "../tools";
-import { createGroupToolDefs } from "../tools";
+import { createWorkspaceToolDefs } from "../tools";
 import { buildGroupExternalMcpServers } from "./group-external-mcp";
-import { buildGroupMemoryAppendSystemPrompt } from "./group-memory-prompt";
+import { buildWorkspaceMemoryAppendSystemPrompt } from "./group-memory-prompt";
 import { resolveAgentProfile } from "./profile-config";
 import { emitPiSessionShutdown } from "./pi-session-shutdown";
 import type { ResolvedAgentProfile } from "./types";
@@ -51,7 +50,8 @@ import type { ResolvedAgentProfile } from "./types";
 type PiApi = "anthropic-messages" | "openai-responses" | "openai-completions";
 
 export interface PiGroupRuntimeContext {
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
+  chat: ChatRow | null;
   workingDirectory: string;
   profile: ResolvedAgentProfile;
 }
@@ -67,6 +67,7 @@ export interface PiGroupSessionHost {
 export interface CreatePiGroupRuntimeFactoryOptions {
   db: Database;
   rootDir?: string;
+  chatId?: string;
   createMessageSender: (context: PiGroupRuntimeContext) => MessageSender;
   getExtensionFactories?: (
     context: PiGroupRuntimeContext,
@@ -117,7 +118,7 @@ export function buildProfileModelRegistry(
   return modelRegistry;
 }
 
-export function getGroupFolderFromWorkingDirectory(
+export function getWorkspaceFolderFromWorkingDirectory(
   workingDirectory: string,
   rootDir = process.cwd(),
 ): string | null {
@@ -131,65 +132,59 @@ export function getGroupFolderFromWorkingDirectory(
   return folder?.trim() || null;
 }
 
-export function getGroupForWorkingDirectory(
+export function getWorkspaceForWorkingDirectory(
   db: Database,
   workingDirectory: string,
   rootDir = process.cwd(),
-): RegisteredGroup | null {
-  const folder = getGroupFolderFromWorkingDirectory(workingDirectory, rootDir);
+): WorkspaceRow | null {
+  const folder = getWorkspaceFolderFromWorkingDirectory(workingDirectory, rootDir);
   if (!folder) {
     return null;
   }
 
-  return getGroupByFolder(db, folder);
+  return resolveRuntimeWorkspaceState(db, folder)?.workspace ?? null;
 }
 
-export function resolveGroupSessionRef(
+function resolveRuntimeWorkspaceState(
   db: Database,
-  groupFolder: string,
+  folder: string,
+): {
+  workspace: WorkspaceRow;
+  memories: WorkspaceMemoryRow[];
+} | null {
+  const workspace = getWorkspaceByFolder(db, folder);
+  if (!workspace) {
+    return null;
+  }
+
+  return {
+    workspace,
+    memories: listWorkspaceMemories(db, workspace.id),
+  };
+}
+
+export function resolveWorkspaceSessionRef(
   workingDirectory: string,
-  options?: {
-    sessionRefOverride?: string | null;
-    persistResolvedRef?: boolean;
-  },
+  sessionRefOverride?: string | null,
 ): string {
-  const persistResolvedRef = options?.persistResolvedRef ?? true;
-  const persistedSessionRef = options?.sessionRefOverride ?? getSessionRef(db, groupFolder);
+  const persistedSessionRef = sessionRefOverride;
   const resolvedPersistedSessionRef = resolvePersistedPiSessionRef(
     workingDirectory,
     persistedSessionRef,
   );
 
-  if (
-    persistedSessionRef
-    && !resolvedPersistedSessionRef
-    && options?.sessionRefOverride == null
-  ) {
-    deleteSessionRef(db, groupFolder);
-  }
-
   if (resolvedPersistedSessionRef) {
-    if (persistResolvedRef && options?.sessionRefOverride == null) {
-      saveSessionRef(db, groupFolder, resolvedPersistedSessionRef);
-    }
     return resolvedPersistedSessionRef;
   }
 
-  if (persistedSessionRef && options?.sessionRefOverride != null) {
+  if (persistedSessionRef) {
     return isAbsolute(persistedSessionRef)
       ? persistedSessionRef
       : resolve(workingDirectory, persistedSessionRef);
   }
 
-  const sessionManager = SessionManager.continueRecent(
-    workingDirectory,
-    ensurePiSessionDir(workingDirectory),
-  );
-  const sessionRef = getPiSessionRef(sessionManager);
-  if (persistResolvedRef && options?.sessionRefOverride == null) {
-    saveSessionRef(db, groupFolder, sessionRef);
-  }
-  return sessionRef;
+  ensurePiSessionDir(workingDirectory);
+  return getPiSessionRef(createPiSessionManager(workingDirectory));
 }
 
 function createDefaultPiTools(workingDirectory: string) {
@@ -215,20 +210,24 @@ export function createPiGroupRuntimeFactory(
     sessionManager,
     sessionStartEvent,
   }): Promise<CreateAgentSessionRuntimeResult> => {
-    const group = getGroupForWorkingDirectory(options.db, cwd, rootDir);
-    if (!group) {
-      throw new Error(`No registered group matches cwd: ${cwd}`);
+    const folder = getWorkspaceFolderFromWorkingDirectory(cwd, rootDir);
+    const runtimeState = folder ? resolveRuntimeWorkspaceState(options.db, folder) : null;
+    if (!runtimeState) {
+      throw new Error(`No runtime workspace matches cwd: ${cwd}`);
     }
 
-    const profile = resolveAgentProfile(group.profile_key);
+    const { workspace, memories } = runtimeState;
+    const chat = options.chatId ? getChatById(options.db, options.chatId) : null;
+    const profile = resolveAgentProfile(workspace.profile_key);
     const context: PiGroupRuntimeContext = {
-      group,
+      workspace,
+      chat,
       workingDirectory: cwd,
       profile,
     };
 
     const mcpBundle = await createPiMcpExtensionBundle(
-      buildGroupExternalMcpServers(group.folder, rootDir),
+      buildGroupExternalMcpServers(workspace.folder, rootDir),
       cwd,
     );
 
@@ -239,8 +238,8 @@ export function createPiGroupRuntimeFactory(
         agentDir,
         modelRegistry: buildProfileModelRegistry(profile),
         resourceLoaderOptions: {
-          appendSystemPrompt: buildGroupMemoryAppendSystemPrompt(
-            listGroupMemories(options.db, group.folder),
+          appendSystemPrompt: buildWorkspaceMemoryAppendSystemPrompt(
+            memories,
           ),
           extensionFactories: [
             ...mcpBundle.extensionFactories,
@@ -258,13 +257,12 @@ export function createPiGroupRuntimeFactory(
 
       const sender = options.createMessageSender(context);
       const customTools = adaptOctoTools(
-        createGroupToolDefs(
-          group.folder,
-          group.is_main === 1,
-          options.db,
-          sender,
-          rootDir,
-        ),
+        createWorkspaceToolDefs({
+          workspaceId: workspace.id,
+          workspaceFolder: workspace.folder,
+          chatId: chat?.id ?? "",
+          isMain: workspace.is_main === 1,
+        }, options.db, sender, rootDir),
       );
 
       const created = await createAgentSessionFromServices({
@@ -298,31 +296,26 @@ export function createPiGroupRuntimeFactory(
 
 export async function createPiGroupRuntime(
   options: CreatePiGroupRuntimeFactoryOptions & {
-    groupFolder: string;
+    workspaceFolder: string;
     agentDir?: string;
     sessionRefOverride?: string | null;
-    persistSessionRef?: boolean;
   },
 ): Promise<{
   runtime: AgentSessionRuntime;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const group = getGroupByFolder(options.db, options.groupFolder);
-  if (!group) {
-    throw new Error(`Group not found: ${options.groupFolder}`);
+  const runtimeState = resolveRuntimeWorkspaceState(options.db, options.workspaceFolder);
+  if (!runtimeState) {
+    throw new Error(`Workspace not found: ${options.workspaceFolder}`);
   }
 
-  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
-  const sessionRef = resolveGroupSessionRef(
-    options.db,
-    group.folder,
+  const { workspace } = runtimeState;
+  const workingDirectory = getWorkspaceDirectory(workspace.folder, { rootDir });
+  const sessionRef = resolveWorkspaceSessionRef(
     workingDirectory,
-    {
-      sessionRefOverride: options.sessionRefOverride,
-      persistResolvedRef: options.persistSessionRef ?? true,
-    },
+    options.sessionRefOverride,
   );
   const sessionManager = createPiSessionManager(workingDirectory, sessionRef);
   const runtime = await createAgentSessionRuntime(
@@ -334,45 +327,36 @@ export async function createPiGroupRuntime(
     },
   );
 
-  if (options.persistSessionRef ?? true) {
-    saveSessionRef(options.db, group.folder, runtime.session.sessionFile ?? sessionRef);
-  }
-
   return {
     runtime,
-    group,
+    workspace,
     sessionRef: runtime.session.sessionFile ?? sessionRef,
   };
 }
 
 export async function createPiGroupSessionHost(
   options: CreatePiGroupRuntimeFactoryOptions & {
-    groupFolder: string;
+    workspaceFolder: string;
     agentDir?: string;
     sessionStartEvent?: SessionStartEvent;
     sessionRefOverride?: string | null;
-    persistSessionRef?: boolean;
   },
 ): Promise<{
   host: PiGroupSessionHost;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const group = getGroupByFolder(options.db, options.groupFolder);
-  if (!group) {
-    throw new Error(`Group not found: ${options.groupFolder}`);
+  const runtimeState = resolveRuntimeWorkspaceState(options.db, options.workspaceFolder);
+  if (!runtimeState) {
+    throw new Error(`Workspace not found: ${options.workspaceFolder}`);
   }
 
-  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
-  const sessionRef = resolveGroupSessionRef(
-    options.db,
-    group.folder,
+  const { workspace } = runtimeState;
+  const workingDirectory = getWorkspaceDirectory(workspace.folder, { rootDir });
+  const sessionRef = resolveWorkspaceSessionRef(
     workingDirectory,
-    {
-      sessionRefOverride: options.sessionRefOverride,
-      persistResolvedRef: options.persistSessionRef ?? true,
-    },
+    options.sessionRefOverride,
   );
   const sessionManager = createPiSessionManager(workingDirectory, sessionRef);
   const createRuntime = createPiGroupRuntimeFactory(options);
@@ -383,10 +367,6 @@ export async function createPiGroupSessionHost(
     sessionStartEvent: options.sessionStartEvent,
   });
   const resolvedSessionRef = created.session.sessionFile ?? sessionRef;
-
-  if (options.persistSessionRef ?? true) {
-    saveSessionRef(options.db, group.folder, resolvedSessionRef);
-  }
 
   return {
     host: {
@@ -399,7 +379,7 @@ export async function createPiGroupSessionHost(
         created.session.dispose();
       },
     },
-    group,
+    workspace,
     sessionRef: resolvedSessionRef,
   };
 }

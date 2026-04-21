@@ -6,12 +6,10 @@ import { FeishuChannel } from "./channels/feishu";
 import { ChannelManager } from "./channels/manager";
 import {
   type ChatRow,
-  type RegisteredGroup,
   type WorkspaceRow,
-  getGroupByJid,
+  getChatByBinding,
   initDatabase,
 } from "./db";
-import { GroupService } from "./group-service";
 import { log } from "./logger";
 import type { PiGroupRuntimeContext } from "./runtime/pi-group-runtime-factory";
 import type { MessageSender } from "./tools";
@@ -27,14 +25,12 @@ const TAG = "cli";
 export interface CliArgs {
   workspace?: string;
   chatId?: string;
-  groupFolder?: string;
   help: boolean;
 }
 
 export interface CliSelection {
   workspace: WorkspaceRow;
   chat: ChatRow;
-  group: RegisteredGroup | null;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -45,16 +41,6 @@ export function parseCliArgs(argv: string[]): CliArgs {
 
     if (token === "--help" || token === "-h") {
       args.help = true;
-      continue;
-    }
-
-    if (token === "--group") {
-      const value = argv[index + 1]?.trim();
-      if (!value) {
-        throw new Error("Missing value for --group");
-      }
-      args.groupFolder = value;
-      index += 1;
       continue;
     }
 
@@ -84,31 +70,6 @@ export function parseCliArgs(argv: string[]): CliArgs {
   return args;
 }
 
-export function resolveInitialCliGroup(
-  groupService: GroupService,
-  stateStore: CliStateStore,
-  requestedGroupFolder?: string,
-): RegisteredGroup {
-  if (requestedGroupFolder) {
-    const requested = groupService.getGroupByFolder(requestedGroupFolder);
-    if (!requested || requested.channel_type !== "cli") {
-      throw new Error(`CLI group not found: ${requestedGroupFolder}`);
-    }
-
-    return requested;
-  }
-
-  const lastUsedFolder = stateStore.getCurrentGroupFolder();
-  if (lastUsedFolder) {
-    const lastUsed = groupService.getGroupByFolder(lastUsedFolder);
-    if (lastUsed && lastUsed.channel_type === "cli") {
-      return lastUsed;
-    }
-  }
-
-  return groupService.createCliGroup();
-}
-
 function getOrCreateDefaultChat(
   workspaceService: WorkspaceService,
   workspace: WorkspaceRow,
@@ -133,13 +94,11 @@ function resolveWorkspaceByInput(
 }
 
 export function resolveInitialCliTarget(
-  groupService: GroupService,
   workspaceService: WorkspaceService,
   stateStore: CliStateStore,
   options: {
     workspace?: string;
     chatId?: string;
-    groupFolder?: string;
   } = {},
 ): CliSelection {
   if (options.chatId) {
@@ -164,11 +123,7 @@ export function resolveInitialCliTarget(
       throw new Error(`Workspace not found: ${chat.workspace_id}`);
     }
 
-    return {
-      workspace,
-      chat,
-      group: groupService.getGroupByFolder(workspace.folder),
-    };
+    return { workspace, chat };
   }
 
   if (options.workspace) {
@@ -180,25 +135,6 @@ export function resolveInitialCliTarget(
     return {
       workspace,
       chat: getOrCreateDefaultChat(workspaceService, workspace),
-      group: groupService.getGroupByFolder(workspace.folder),
-    };
-  }
-
-  if (options.groupFolder) {
-    const group = resolveInitialCliGroup(
-      groupService,
-      stateStore,
-      options.groupFolder,
-    );
-    const workspace = workspaceService.getWorkspaceByFolder(group.folder);
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${group.folder}`);
-    }
-
-    return {
-      workspace,
-      chat: getOrCreateDefaultChat(workspaceService, workspace),
-      group,
     };
   }
 
@@ -208,11 +144,7 @@ export function resolveInitialCliTarget(
     if (chat) {
       const workspace = workspaceService.getWorkspaceById(chat.workspace_id);
       if (workspace) {
-        return {
-          workspace,
-          chat,
-          group: groupService.getGroupByFolder(workspace.folder),
-        };
+        return { workspace, chat };
       }
     }
   }
@@ -224,22 +156,12 @@ export function resolveInitialCliTarget(
       return {
         workspace,
         chat: getOrCreateDefaultChat(workspaceService, workspace),
-        group: groupService.getGroupByFolder(workspace.folder),
       };
     }
   }
 
-  const createdGroup = groupService.createCliGroup();
-  const workspace = workspaceService.getWorkspaceByFolder(createdGroup.folder);
-  if (!workspace) {
-    throw new Error(`Workspace not found: ${createdGroup.folder}`);
-  }
-
-  return {
-    workspace,
-    chat: getOrCreateDefaultChat(workspaceService, workspace),
-    group: createdGroup,
-  };
+  const created = workspaceService.createCliWorkspace();
+  return created;
 }
 
 export function createCliMessageSender(
@@ -247,27 +169,27 @@ export function createCliMessageSender(
   channelManager: ChannelManager,
 ) {
   return (context: PiGroupRuntimeContext): MessageSender => ({
-    send: async (chatJid, text) => {
-      const targetGroup = getGroupByJid(db, chatJid);
-      if (targetGroup?.channel_type === "cli") {
+    send: async (externalChatId, text) => {
+      const targetChat = getChatByBinding(db, "cli", externalChatId);
+      if (targetChat) {
         throw new Error(
-          `send_message to CLI groups is unsupported from ${context.group.folder}; reply in the current session instead`,
+          `send_message to CLI chats is unsupported from ${context.workspace.folder}; reply in the current session instead`,
         );
       }
 
-      await channelManager.send(chatJid, text);
+      await channelManager.send(externalChatId, text);
     },
-    sendImage: async (chatJid, filePath) => {
-      const targetGroup = getGroupByJid(db, chatJid);
-      if (targetGroup?.channel_type === "cli") {
+    sendImage: async (externalChatId, filePath) => {
+      const targetChat = getChatByBinding(db, "cli", externalChatId);
+      if (targetChat) {
         throw new Error(
-          `send_image to CLI groups is unsupported from ${context.group.folder}`,
+          `send_image to CLI chats is unsupported from ${context.workspace.folder}`,
         );
       }
 
-      await channelManager.sendImage(chatJid, filePath);
+      await channelManager.sendImage(externalChatId, filePath);
     },
-    refreshGroupMetadata: async () => ({
+    refreshChatMetadata: async () => ({
       count: (await channelManager.refreshGroupMetadata()).length,
     }),
   });
@@ -302,7 +224,6 @@ function printHelp(): void {
     "Options:",
     "  --workspace <id|folder>  Open a specific workspace",
     "  --chat <chatId>          Open a specific chat",
-    "  --group <folder>         Legacy alias for opening a CLI workspace",
     "  -h, --help               Show this help",
   ].join("\n"));
 }
@@ -362,67 +283,59 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
 
   ensureCliAgentProfilesPath(rootDir);
 
-  const db = initDatabase("store/messages.db");
-  const groupService = new GroupService(db, { rootDir });
+  const db = initDatabase(resolve(rootDir, "store/messages.db"));
   const workspaceService = new WorkspaceService(db, { rootDir });
-  for (const group of groupService.listGroups()) {
-    groupService.ensureWorkspace(group);
+  for (const workspace of workspaceService.listWorkspaces()) {
+    workspaceService.ensureWorkspaceDirectory(workspace);
   }
 
-  const stateStore = new CliStateStore();
+  const stateStore = new CliStateStore(resolve(rootDir, "store/cli-state.json"));
+  const channelManager = new ChannelManager(db);
+  registerOutboundFeishuChannel(channelManager);
+  let runtimeHost: OctoCliRuntimeHost | null = null;
+
+  const manager = new GroupRuntimeManager({
+    db,
+    workspaceService,
+    rootDir,
+    createMessageSender: createCliMessageSender(db, channelManager),
+    getExtensionFactories: () => [
+      createOctoGroupExtension({
+        workspaceService,
+        getRuntimeHost: () => runtimeHost,
+      }),
+    ],
+  });
+
   const initial = resolveInitialCliTarget(
-    groupService,
     workspaceService,
     stateStore,
     {
       workspace: args.workspace,
       chatId: args.chatId,
-      groupFolder: args.groupFolder,
     },
   );
-
-  const channelManager = new ChannelManager(db);
-  registerOutboundFeishuChannel(channelManager);
-
-  let runtimeHostRef: OctoCliRuntimeHost | null = null;
-  const octoGroupExtension = createOctoGroupExtension({
-    groupService,
-    workspaceService,
-    getRuntimeHost: () => runtimeHostRef,
-  });
-
-  const runtimeManager = new GroupRuntimeManager({
-    db,
-    workspaceService,
-    rootDir,
-    createMessageSender: createCliMessageSender(db, channelManager),
-    getExtensionFactories: async () => [octoGroupExtension],
-  });
-  const runtime = await runtimeManager.ensureRuntime(initial.chat.id);
-
-  const runtimeHost = new OctoCliRuntimeHost({
-    manager: runtimeManager,
+  const runtime = await manager.ensureRuntime(initial.chat.id);
+  runtimeHost = new OctoCliRuntimeHost({
+    manager,
     stateStore,
     currentWorkspace: initial.workspace,
     currentChat: initial.chat,
-    currentGroup: initial.group,
     runtime,
-  });
-  runtimeHostRef = runtimeHost;
-
-  log.info(TAG, "Starting Octo CLI", {
-    workspaceFolder: initial.workspace.folder,
-    workspaceName: initial.workspace.name,
-    chatId: initial.chat.id,
-    chatTitle: initial.chat.title,
-    cwd: getWorkspaceDirectory(initial.workspace.folder, { rootDir }),
   });
 
   const interactiveMode = new InteractiveMode(runtimeHost);
   runtimeHost.setExternalSwitchHandler(async () => {
     await syncInteractiveModeRuntime(interactiveMode);
   });
-  await interactiveMode.run();
+
+  try {
+    await interactiveMode.run();
+  } finally {
+    await channelManager.stopAll();
+    await manager.dispose();
+    db.close(false);
+  }
 }
 
 if (import.meta.main) {
@@ -432,9 +345,3 @@ if (import.meta.main) {
     process.exitCode = 1;
   });
 }
-
-export const __test__ = {
-  ensureCliAgentProfilesPath,
-  registerOutboundFeishuChannel,
-  resolveInitialCliTarget,
-};

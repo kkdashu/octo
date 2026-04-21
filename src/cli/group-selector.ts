@@ -1,6 +1,6 @@
-import type { ChatRow, RegisteredGroup } from "../db";
+import type { ChatRow, WorkspaceRow } from "../db";
 
-export interface GroupSelectorUI {
+export interface WorkspaceSelectorUI {
   select(
     title: string,
     options: string[],
@@ -8,27 +8,29 @@ export interface GroupSelectorUI {
   ): Promise<string | undefined>;
 }
 
-export function formatGroupOption(
-  group: RegisteredGroup,
-  currentGroupFolder?: string,
+export function formatWorkspaceOption(
+  workspace: WorkspaceRow,
+  currentWorkspaceFolder?: string,
 ): string {
-  const currentMark = group.folder === currentGroupFolder ? "* " : "  ";
-  const mainMark = group.is_main === 1 ? " [main]" : "";
-  return `${currentMark}${group.folder}  ${group.name}${mainMark}`;
+  const currentMark = workspace.folder === currentWorkspaceFolder ? "* " : "  ";
+  const mainMark = workspace.is_main === 1 ? " [main]" : "";
+  return `${currentMark}${workspace.folder}  ${workspace.name}${mainMark}`;
 }
 
-export async function selectCliGroup(
-  ui: GroupSelectorUI,
-  groups: RegisteredGroup[],
-  currentGroupFolder?: string,
-  title = "CLI Groups",
-): Promise<RegisteredGroup | undefined> {
-  if (groups.length === 0) {
+export async function selectWorkspace(
+  ui: WorkspaceSelectorUI,
+  workspaces: WorkspaceRow[],
+  currentWorkspaceFolder?: string,
+  title = "Workspaces",
+): Promise<WorkspaceRow | undefined> {
+  if (workspaces.length === 0) {
     return undefined;
   }
 
-  const options = groups.map((group) => formatGroupOption(group, currentGroupFolder));
-  const byOption = new Map(options.map((option, index) => [option, groups[index]!]));
+  const options = workspaces.map((workspace) =>
+    formatWorkspaceOption(workspace, currentWorkspaceFolder)
+  );
+  const byOption = new Map(options.map((option, index) => [option, workspaces[index]!]));
   const selected = await ui.select(title, options);
   return selected ? byOption.get(selected) : undefined;
 }
@@ -42,7 +44,7 @@ export function formatChatOption(
 }
 
 export async function selectWorkspaceChat(
-  ui: GroupSelectorUI,
+  ui: WorkspaceSelectorUI,
   chats: ChatRow[],
   currentChatId?: string,
   title = "Workspace Chats",

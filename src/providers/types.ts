@@ -14,7 +14,7 @@ export interface ConversationMessageInput {
 }
 
 export interface OpenConversationInput {
-  groupFolder: string;
+  workspaceFolder: string;
   workingDirectory: string;
   isMain: boolean;
   tools: ToolDefinition[];
@@ -24,7 +24,7 @@ export interface OpenConversationInput {
 }
 
 export interface ResetSessionInput {
-  groupFolder: string;
+  workspaceFolder: string;
   workingDirectory: string;
   profile: ResolvedAgentProfile;
   resumeSessionRef?: string;

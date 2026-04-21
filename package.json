@@ -11,6 +11,7 @@
   "scripts": {
     "start": "bun src/index.ts",
     "cli": "bun src/cli.ts",
+    "reset:workspace-chat-state": "bun scripts/reset-workspace-chat-state.ts",
     "desktop:sidecar": "bun src/desktop/main.ts",
     "desktop:app": "cd desktop && bun install && bun run tauri:dev",
     "test": "bun test tests/*.test.ts",

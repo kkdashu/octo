@@ -52,7 +52,8 @@ function pollAndExecute(
 
   log.info(TAG, `Found ${dueTasks.length} due task(s)`, dueTasks.map((t) => ({
     id: t.id,
-    groupFolder: t.group_folder,
+    workspaceId: t.workspace_id,
+    chatId: t.chat_id,
     scheduleValue: t.schedule_value,
     nextRun: t.next_run,
     contextMode: t.context_mode,
@@ -72,26 +73,23 @@ function pollAndExecute(
     // Update next_run immediately to prevent duplicate execution
     updateTaskAfterRun(db, task.id, nextRun);
 
-    log.info(TAG, `Executing task ${task.id} for group ${task.group_folder}`, {
+    log.info(TAG, `Executing task ${task.id} for workspace ${task.workspace_id}`, {
       prompt: task.prompt.substring(0, 200),
       contextMode: task.context_mode,
       nextRun,
     });
 
-    // Enqueue the task prompt into the group queue
     const prompt = `[Scheduled Task ${task.id}]\n${task.prompt}`;
 
-    if (task.context_mode === "group" && groupQueue.isActive(task.group_folder)) {
-      // Reuse active session
-      log.info(TAG, `Pushing scheduled task to active session: ${task.group_folder}`);
-      groupQueue.pushMessage(task.group_folder, {
+    if (task.context_mode === "workspace" && groupQueue.isActive(task.chat_id)) {
+      log.info(TAG, `Pushing scheduled task to active session: ${task.chat_id}`);
+      groupQueue.pushMessage(task.chat_id, {
         mode: "follow_up",
         text: prompt,
       });
     } else {
-      // Start new agent (or queue behind existing)
-      log.info(TAG, `Enqueuing scheduled task as new agent run: ${task.group_folder}`);
-      groupQueue.enqueue(task.group_folder, prompt);
+      log.info(TAG, `Enqueuing scheduled task as new agent run: ${task.chat_id}`);
+      groupQueue.enqueue(task.chat_id, prompt);
     }
   }
 }

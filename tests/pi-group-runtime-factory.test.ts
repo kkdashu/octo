@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { initDatabase } from "../src/db";
-import { resolveGroupSessionRef } from "../src/runtime/pi-group-runtime-factory";
+import {
+  getWorkspaceForWorkingDirectory,
+  resolveWorkspaceSessionRef,
+} from "../src/runtime/pi-group-runtime-factory";
 import { ensurePiSessionDir, materializePiSessionRef } from "../src/providers/pi-session-ref";
+import { WorkspaceService } from "../src/workspace-service";
 
 function createProfilesConfig(rootDir: string): string {
   const configPath = join(rootDir, "agent-profiles.json");
@@ -45,18 +49,48 @@ describe("pi group runtime factory", () => {
       );
       const explicitSession = join(sessionDir, "chat-2.jsonl");
 
-      const resolved = resolveGroupSessionRef(
-        db,
-        "atlas",
+      const resolved = resolveWorkspaceSessionRef(
         workingDirectory,
-        {
-          sessionRefOverride: explicitSession,
-          persistResolvedRef: false,
-        },
+        explicitSession,
       );
 
       expect(recentSession).not.toBe(explicitSession);
       expect(resolved).toBe(explicitSession);
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves workspace context from the workspace working directory", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-pi-runtime-factory-"));
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      process.env.AGENT_PROFILES_PATH = createProfilesConfig(rootDir);
+      const db = initDatabase(join(rootDir, "store", "messages.db"));
+      const workspaceService = new WorkspaceService(db, { rootDir });
+      const workspace = workspaceService.ensureFeishuWorkspace("cli_test_app", {
+        profileKey: "claude",
+      });
+
+      const resolved = getWorkspaceForWorkingDirectory(
+        db,
+        join(rootDir, "workspaces", workspace.folder),
+        rootDir,
+      );
+
+      expect(resolved).not.toBeNull();
+      expect(resolved).toMatchObject({
+        folder: workspace.folder,
+        name: workspace.name,
+        profile_key: "claude",
+      });
+      expect(resolved?.id).toBe(workspace.id);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

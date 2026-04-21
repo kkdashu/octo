@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Channel, ChatInfo } from "./types";
-import { getGroupByJid } from "../db";
+import {
+  getChatByBinding,
+  getWorkspaceForChat,
+} from "../db";
 import { getWorkspaceDirectory } from "../group-workspace";
 import { log } from "../logger";
 import {
@@ -37,11 +40,15 @@ export class ChannelManager {
   }
 
   getChannelForChat(chatJid: string): Channel | undefined {
-    const group = getGroupByJid(this.db, chatJid);
-    if (group) {
-      const ch = this.channels.get(group.channel_type);
+    const chat = getChatByBinding(this.db, "feishu", chatJid)
+      ?? getChatByBinding(this.db, "cli", chatJid);
+    if (chat) {
+      const bindingPlatform = getChatByBinding(this.db, "feishu", chatJid)
+        ? "feishu"
+        : "cli";
+      const ch = this.channels.get(bindingPlatform);
       log.debug(TAG, `Resolved channel for chat ${chatJid}`, {
-        channelType: group.channel_type,
+        channelType: bindingPlatform,
         found: !!ch,
       });
       return ch;
@@ -72,16 +79,22 @@ export class ChannelManager {
       return resolve(normalizedPath);
     }
 
-    const group = getGroupByJid(this.db, chatJid);
-    if (!group) {
+    const chat = getChatByBinding(this.db, "feishu", chatJid)
+      ?? getChatByBinding(this.db, "cli", chatJid);
+    if (!chat) {
       return resolve(normalizedPath);
     }
 
-    const groupWorkdir = getWorkspaceDirectory(group.folder);
-    const resolvedPath = resolve(groupWorkdir, normalizedPath);
-    if (isEscapedPath(groupWorkdir, resolvedPath)) {
+    const workspace = getWorkspaceForChat(this.db, chat.id);
+    if (!workspace) {
+      return resolve(normalizedPath);
+    }
+
+    const workspaceDir = getWorkspaceDirectory(workspace.folder);
+    const resolvedPath = resolve(workspaceDir, normalizedPath);
+    if (isEscapedPath(workspaceDir, resolvedPath)) {
       throw new Error(
-        `Invalid asset path: must stay within current group directory (${assetPath})`,
+        `Invalid asset path: must stay within current workspace directory (${assetPath})`,
       );
     }
 

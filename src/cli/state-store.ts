@@ -5,7 +5,6 @@ import { dirname, join, resolve } from "node:path";
 interface CliStateData {
   currentWorkspaceFolder?: string;
   currentChatId?: string;
-  currentGroupFolder?: string;
 }
 
 export class CliStateStore {
@@ -13,18 +12,9 @@ export class CliStateStore {
     private readonly filePath = join(homedir(), ".octo", "cli-state.json"),
   ) {}
 
-  getCurrentGroupFolder(): string | null {
-    const state = this.read();
-    return state.currentGroupFolder?.trim()
-      || state.currentWorkspaceFolder?.trim()
-      || null;
-  }
-
   getCurrentWorkspaceFolder(): string | null {
     const state = this.read();
-    return state.currentWorkspaceFolder?.trim()
-      || state.currentGroupFolder?.trim()
-      || null;
+    return state.currentWorkspaceFolder?.trim() || null;
   }
 
   getCurrentChatId(): string | null {
@@ -32,19 +22,10 @@ export class CliStateStore {
     return state.currentChatId?.trim() || null;
   }
 
-  setCurrentGroupFolder(folder: string): void {
-    const next: CliStateData = {
-      currentWorkspaceFolder: folder,
-      currentGroupFolder: folder,
-    };
-    this.write(next);
-  }
-
   setCurrentChat(chatId: string, workspaceFolder: string): void {
     const next: CliStateData = {
       currentChatId: chatId,
       currentWorkspaceFolder: workspaceFolder,
-      currentGroupFolder: workspaceFolder,
     };
     this.write(next);
   }

@@ -213,8 +213,8 @@ export class PiProvider implements AgentRuntime {
     const sessionManager = createPiSessionManager(input.workingDirectory);
     const sessionRef = getPiSessionRef(sessionManager);
 
-    log.info(TAG, `Created fresh Pi session for ${input.groupFolder}`, {
-      groupFolder: input.groupFolder,
+    log.info(TAG, `Created fresh Pi session for ${input.workspaceFolder}`, {
+      workspaceFolder: input.workspaceFolder,
       sessionRef,
       workingDirectory: input.workingDirectory,
       profileKey: input.profile.profileKey,

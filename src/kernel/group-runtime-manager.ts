@@ -10,8 +10,6 @@ import {
   appendRunEvent,
   createRun,
   getChatById,
-  getChatBySessionRef,
-  getGroupByFolder,
   getRunById,
   getWorkspaceRuntimeState,
   updateChat,
@@ -26,7 +24,6 @@ import type { MessageSender } from "../tools";
 import type { PiGroupRuntimeContext } from "../runtime/pi-group-runtime-factory";
 import {
   createPiGroupRuntime,
-  getGroupFolderFromWorkingDirectory,
 } from "../runtime/pi-group-runtime-factory";
 import {
   checkoutWorkspaceBranch,
@@ -43,14 +40,13 @@ import {
   toRenderableAssistantDelta,
   toRenderableMessage,
 } from "./renderable-message";
-import { getSessionHeader } from "./session-file";
 import type {
-  GroupRuntimeEvent,
-  GroupRuntimeListener,
-  GroupRuntimeOperationResult,
-  GroupRuntimeSnapshot,
-  GroupRuntimeSnapshotController,
-  GroupRuntimeSummary,
+  RuntimeEvent,
+  RuntimeListener,
+  RuntimeOperationResult,
+  RuntimeSnapshot,
+  RuntimeSnapshotController,
+  RuntimeSummary,
 } from "./types";
 
 type CreateChatRuntimeResult = {
@@ -84,15 +80,6 @@ export interface GroupRuntimeManagerOptions {
   createChatRuntime?: (
     chatId: string,
   ) => Promise<CreateChatRuntimeResult>;
-  createGroupRuntime?: (
-    groupFolder: string,
-  ) => Promise<{
-    group: {
-      folder: string;
-    };
-    runtime: AgentSessionRuntime;
-    sessionRef: string;
-  }>;
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -115,10 +102,10 @@ function stringifyUnknown(value: unknown): string {
   }
 }
 
-export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
+export class GroupRuntimeManager implements RuntimeSnapshotController {
   private readonly rootDir: string;
   private readonly workspaceService: WorkspaceService;
-  private readonly listeners = new Map<string, Set<GroupRuntimeListener>>();
+  private readonly listeners = new Map<string, Set<RuntimeListener>>();
   private readonly runtimes = new Map<string, ManagedChatRuntime>();
   private readonly pendingLoads = new Map<string, Promise<ManagedChatRuntime>>();
   private readonly createChatRuntime: (
@@ -129,21 +116,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     this.rootDir = options.rootDir ?? process.cwd();
     this.workspaceService = options.workspaceService
       ?? new WorkspaceService(options.db, { rootDir: this.rootDir });
-    const legacyCreateGroupRuntime = options.createGroupRuntime;
     this.createChatRuntime = options.createChatRuntime
-      ?? (legacyCreateGroupRuntime
-        ? async (chatId) => {
-          const chat = this.resolveChat(chatId);
-          const workspace = this.getWorkspaceForChat(chat);
-          const created = await legacyCreateGroupRuntime(workspace.folder);
-          return {
-            workspace,
-            chat,
-            runtime: created.runtime,
-            sessionRef: created.sessionRef,
-          };
-        }
-        : undefined)
       ?? (async (chatId) => {
         const chat = this.workspaceService.getChatById(chatId);
         if (!chat) {
@@ -158,11 +131,11 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
         const { runtime, sessionRef } = await createPiGroupRuntime({
           db: options.db,
           rootDir: this.rootDir,
-          groupFolder: workspace.folder,
+          chatId: chat.id,
+          workspaceFolder: workspace.folder,
           createMessageSender: options.createMessageSender,
           getExtensionFactories: options.getExtensionFactories,
           sessionRefOverride: chat.session_ref,
-          persistSessionRef: false,
         });
 
         return {
@@ -174,7 +147,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
       });
   }
 
-  listGroups(): GroupRuntimeSummary[] {
+  listChats(): RuntimeSummary[] {
     return this.workspaceService
       .listWorkspaces()
       .flatMap((workspace) =>
@@ -191,7 +164,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     return this.runtimes.get(chatId)?.runtime ?? null;
   }
 
-  async getSnapshot(chatId: string): Promise<GroupRuntimeSnapshot> {
+  async getSnapshot(chatId: string): Promise<RuntimeSnapshot> {
     const managed = await this.ensureManagedRuntime(chatId);
     return this.buildSnapshot(managed);
   }
@@ -199,7 +172,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   async prompt(
     chatId: string,
     input: ConversationMessageInput,
-  ): Promise<GroupRuntimeSnapshot> {
+  ): Promise<RuntimeSnapshot> {
     const managed = await this.ensureManagedRuntime(chatId);
     const shouldStartRun = !managed.runtime.session.isStreaming;
     let startedRun: RunRow | null = null;
@@ -223,7 +196,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     return snapshot;
   }
 
-  async abort(chatId: string): Promise<GroupRuntimeSnapshot> {
+  async abort(chatId: string): Promise<RuntimeSnapshot> {
     const managed = await this.ensureManagedRuntime(chatId);
     await managed.runtime.session.abort();
     if (managed.currentRunId) {
@@ -234,7 +207,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     return snapshot;
   }
 
-  async newSession(chatId: string): Promise<GroupRuntimeSnapshot> {
+  async newSession(chatId: string): Promise<RuntimeSnapshot> {
     const result = await this.createNewSession(chatId);
     return result.snapshot;
   }
@@ -242,7 +215,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   async createNewSession(
     chatId: string,
     options?: Parameters<AgentSessionRuntime["newSession"]>[0],
-  ): Promise<GroupRuntimeOperationResult> {
+  ): Promise<RuntimeOperationResult> {
     const managed = await this.ensureManagedRuntime(chatId);
     const result = await managed.runtime.newSession(options);
     return this.afterRuntimeOperation(managed, result.cancelled);
@@ -251,7 +224,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   async fork(
     chatId: string,
     entryId: string,
-  ): Promise<GroupRuntimeOperationResult> {
+  ): Promise<RuntimeOperationResult> {
     const managed = await this.ensureManagedRuntime(chatId);
     const result = await managed.runtime.fork(entryId);
     return this.afterRuntimeOperation(managed, result.cancelled);
@@ -260,7 +233,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   async importFromJsonl(
     chatId: string,
     inputPath: string,
-  ): Promise<GroupRuntimeOperationResult> {
+  ): Promise<RuntimeOperationResult> {
     const managed = await this.ensureManagedRuntime(chatId);
     const result = await managed.runtime.importFromJsonl(
       inputPath,
@@ -269,73 +242,11 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     return this.afterRuntimeOperation(managed, result.cancelled);
   }
 
-  async switchChat(chatId: string): Promise<GroupRuntimeOperationResult> {
+  async switchChat(chatId: string): Promise<RuntimeOperationResult> {
     const managed = await this.ensureManagedRuntime(chatId);
     const snapshot = this.buildSnapshot(managed);
     return {
       cancelled: false,
-      group: getGroupByFolder(this.options.db, managed.workspace.folder),
-      workspace: managed.workspace,
-      chat: managed.chat,
-      runtime: managed.runtime,
-      snapshot,
-    };
-  }
-
-  async switchGroup(groupFolder: string): Promise<GroupRuntimeOperationResult> {
-    return this.switchChat(groupFolder);
-  }
-
-  async switchSession(
-    _currentChatId: string,
-    sessionPath: string,
-    cwdOverride?: string,
-  ): Promise<GroupRuntimeOperationResult> {
-    const targetCwd = cwdOverride ?? getSessionHeader(sessionPath)?.cwd;
-    if (!targetCwd) {
-      throw new Error(`Cannot resolve session cwd: ${sessionPath}`);
-    }
-
-    const folder = getGroupFolderFromWorkingDirectory(targetCwd, this.rootDir);
-    if (!folder) {
-      throw new Error(`Session is outside Octo registered workspaces: ${sessionPath}`);
-    }
-
-    const workspace = this.workspaceService.getWorkspaceByFolder(folder);
-    if (!workspace) {
-      throw new Error(`Workspace not found for session cwd: ${targetCwd}`);
-    }
-
-    let chat = getChatBySessionRef(this.options.db, sessionPath);
-    if (!chat) {
-      chat = this.workspaceService.createChat(workspace.id, {
-        title: `Imported ${workspace.name}`,
-        activeBranch: workspace.default_branch,
-      });
-      updateChat(this.options.db, chat.id, {
-        sessionRef: sessionPath,
-      });
-      chat = this.workspaceService.getChatById(chat.id);
-      if (!chat) {
-        throw new Error(`Failed to materialize chat for session: ${sessionPath}`);
-      }
-    }
-
-    const managed = await this.ensureManagedRuntime(chat.id);
-    const result = await managed.runtime.switchSession(sessionPath, targetCwd);
-    if (!result.cancelled) {
-      this.persistSessionRef(managed, sessionPath);
-      this.bindSession(managed);
-    }
-
-    const snapshot = this.buildSnapshot(managed);
-    if (!result.cancelled) {
-      this.emit(chat.id, { type: "snapshot", snapshot });
-    }
-
-    return {
-      cancelled: result.cancelled,
-      group: getGroupByFolder(this.options.db, managed.workspace.folder),
       workspace: managed.workspace,
       chat: managed.chat,
       runtime: managed.runtime,
@@ -372,7 +283,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
       confirm: boolean;
       allowDirty?: boolean;
     },
-  ): Promise<GroupRuntimeSnapshot> {
+  ): Promise<RuntimeSnapshot> {
     if (!options.confirm) {
       throw new Error("Branch switch requires explicit confirmation");
     }
@@ -429,7 +340,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
       fromBranch?: string;
       allowDirty?: boolean;
     },
-  ): Promise<GroupRuntimeSnapshot> {
+  ): Promise<RuntimeSnapshot> {
     if (!options.confirm) {
       throw new Error("Branch fork requires explicit confirmation");
     }
@@ -479,9 +390,9 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     return snapshot;
   }
 
-  subscribe(chatId: string, listener: GroupRuntimeListener): () => void {
+  subscribe(chatId: string, listener: RuntimeListener): () => void {
     const resolvedChatId = this.resolveChat(chatId).id;
-    const listeners = this.listeners.get(resolvedChatId) ?? new Set<GroupRuntimeListener>();
+    const listeners = this.listeners.get(resolvedChatId) ?? new Set<RuntimeListener>();
     listeners.add(listener);
     this.listeners.set(resolvedChatId, listeners);
 
@@ -507,9 +418,16 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   private toSummary(
     workspace: WorkspaceRow,
     chat: ChatRow,
-  ): GroupRuntimeSummary {
+  ): RuntimeSummary {
     const runtime = this.runtimes.get(chat.id);
-    const group = getGroupByFolder(this.options.db, workspace.folder);
+    const bindingPlatform = this.options.db
+      .query(
+        `SELECT platform FROM chat_bindings
+         WHERE chat_id = $chatId
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get({ chatId: chat.id }) as { platform: string } | null;
     return {
       workspaceId: workspace.id,
       workspaceFolder: workspace.folder,
@@ -517,13 +435,11 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
       chatId: chat.id,
       chatTitle: chat.title,
       activeBranch: chat.active_branch,
-      channelType: group?.channel_type ?? "workspace",
+      platform: bindingPlatform?.platform ?? "workspace",
       isMain: workspace.is_main === 1,
       profileKey: workspace.profile_key,
       sessionRef: chat.session_ref,
       isStreaming: runtime?.runtime.session.isStreaming ?? false,
-      folder: workspace.folder,
-      name: workspace.name,
     };
   }
 
@@ -783,7 +699,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     }
   }
 
-  private buildSnapshot(managed: ManagedChatRuntime): GroupRuntimeSnapshot {
+  private buildSnapshot(managed: ManagedChatRuntime): RuntimeSnapshot {
     return {
       workspaceId: managed.workspace.id,
       workspaceFolder: managed.workspace.folder,
@@ -798,8 +714,6 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
       pendingFollowUp: [...managed.pendingFollowUp],
       pendingSteering: [...managed.pendingSteering],
       messages: buildRenderableMessages(managed.runtime.session.sessionManager),
-      groupFolder: managed.workspace.folder,
-      groupName: managed.workspace.name,
     };
   }
 
@@ -839,7 +753,7 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
   private async afterRuntimeOperation(
     managed: ManagedChatRuntime,
     cancelled: boolean,
-  ): Promise<GroupRuntimeOperationResult> {
+  ): Promise<RuntimeOperationResult> {
     if (!cancelled) {
       this.bindSession(managed);
       this.persistSessionRef(managed, null);
@@ -855,7 +769,6 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
 
     return {
       cancelled,
-      group: getGroupByFolder(this.options.db, managed.workspace.folder),
       workspace: managed.workspace,
       chat: managed.chat,
       runtime: managed.runtime,
@@ -1063,19 +976,17 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
     workspaceId: string;
     workspaceFolder: string;
     chatId: string;
-    groupFolder: string;
     runId: string | null;
   } {
     return {
       workspaceId: managed.workspace.id,
       workspaceFolder: managed.workspace.folder,
       chatId: managed.chat.id,
-      groupFolder: managed.workspace.folder,
       runId: managed.currentRunId,
     };
   }
 
-  private emit(chatId: string, event: GroupRuntimeEvent): void {
+  private emit(chatId: string, event: RuntimeEvent): void {
     const listeners = this.listeners.get(chatId);
     if (!listeners || listeners.size === 0) {
       return;
@@ -1102,7 +1013,6 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
                 workspaceId: "",
                 workspaceFolder: "",
                 chatId,
-                groupFolder: "",
                 runId: null,
               };
 

@@ -5,14 +5,14 @@ import { resolveEnabledExternalMcpServers } from "./external-mcp-config";
 
 const PDF_TO_MARKDOWN_SKILL_NAME = "pdf-to-markdown";
 
-export function isGroupSkillInstalled(
-  groupFolder: string,
+export function isWorkspaceSkillInstalled(
+  workspaceFolder: string,
   skillName: string,
   rootDir = process.cwd(),
 ): boolean {
   return existsSync(
     resolve(
-      getWorkspaceDirectory(groupFolder, { rootDir }),
+      getWorkspaceDirectory(workspaceFolder, { rootDir }),
       ".pi",
       "skills",
       skillName,
@@ -22,10 +22,10 @@ export function isGroupSkillInstalled(
 }
 
 export function buildGroupExternalMcpServers(
-  groupFolder: string,
+  workspaceFolder: string,
   rootDir = process.cwd(),
 ): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
-  if (!isGroupSkillInstalled(groupFolder, PDF_TO_MARKDOWN_SKILL_NAME, rootDir)) {
+  if (!isWorkspaceSkillInstalled(workspaceFolder, PDF_TO_MARKDOWN_SKILL_NAME, rootDir)) {
     return {};
   }
 

@@ -4,9 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  renameSync,
   statSync,
-  symlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { copyDirRecursive } from "./utils";
@@ -29,47 +27,7 @@ export function getWorkspaceDirectory(
   options: SetupGroupWorkspaceOptions = {},
 ): string {
   const rootDir = options.rootDir ?? process.cwd();
-  const workspaceDir = resolveFromRoot(rootDir, "workspaces", folder);
-  if (existsSync(workspaceDir)) {
-    return workspaceDir;
-  }
-
-  const legacyDir = resolveFromRoot(rootDir, "groups", folder);
-  return existsSync(legacyDir) ? legacyDir : workspaceDir;
-}
-
-export function getLegacyGroupDirectory(
-  folder: string,
-  options: SetupGroupWorkspaceOptions = {},
-): string {
-  const rootDir = options.rootDir ?? process.cwd();
-  return resolveFromRoot(rootDir, "groups", folder);
-}
-
-export function migrateLegacyGroupWorkspace(
-  folder: string,
-  options: SetupGroupWorkspaceOptions = {},
-): void {
-  const rootDir = options.rootDir ?? process.cwd();
-  const workspaceDir = getWorkspaceDirectory(folder, { rootDir });
-  const legacyDir = getLegacyGroupDirectory(folder, { rootDir });
-
-  if (!existsSync(workspaceDir) && existsSync(legacyDir)) {
-    mkdirSync(resolveFromRoot(rootDir, "workspaces"), { recursive: true });
-    renameSync(legacyDir, workspaceDir);
-  }
-
-  const legacyAgentsPath = resolveFromRoot(rootDir, "workspaces", folder, "CLAUDE.md");
-  const agentsPath = resolveFromRoot(rootDir, "workspaces", folder, "AGENTS.md");
-  if (!existsSync(agentsPath) && existsSync(legacyAgentsPath)) {
-    copyFileSync(legacyAgentsPath, agentsPath);
-  }
-
-  const legacySkillsDir = resolveFromRoot(rootDir, "workspaces", folder, ".claude", "skills");
-  const piSkillsDir = resolveFromRoot(rootDir, "workspaces", folder, ".pi", "skills");
-  if (!existsSync(piSkillsDir) && existsSync(legacySkillsDir)) {
-    copyDirRecursive(legacySkillsDir, piSkillsDir);
-  }
+  return resolveFromRoot(rootDir, "workspaces", folder);
 }
 
 function ensureWorkspacePiDirectories(
@@ -79,26 +37,6 @@ function ensureWorkspacePiDirectories(
   const workspaceDir = getWorkspaceDirectory(folder, options);
   mkdirSync(resolve(workspaceDir, ".pi", "skills"), { recursive: true });
   mkdirSync(resolve(workspaceDir, ".pi", "sessions"), { recursive: true });
-}
-
-function ensureLegacyGroupLink(
-  folder: string,
-  options: SetupGroupWorkspaceOptions = {},
-): void {
-  const rootDir = options.rootDir ?? process.cwd();
-  const legacyDir = resolveFromRoot(rootDir, "groups", folder);
-  const workspaceDir = resolveFromRoot(rootDir, "workspaces", folder);
-
-  if (existsSync(legacyDir)) {
-    return;
-  }
-
-  mkdirSync(resolveFromRoot(rootDir, "groups"), { recursive: true });
-  try {
-    symlinkSync(workspaceDir, legacyDir, "dir");
-  } catch {
-    // Ignore environments that do not allow symlink creation.
-  }
 }
 
 export function ensureAgentsMd(
@@ -209,12 +147,10 @@ export function setupWorkspaceDirectory(
   options: SetupGroupWorkspaceOptions = {},
 ): void {
   const rootDir = options.rootDir ?? process.cwd();
-  migrateLegacyGroupWorkspace(folder, { rootDir });
   mkdirSync(resolveFromRoot(rootDir, "workspaces", folder), { recursive: true });
   ensureWorkspacePiDirectories(folder, { rootDir });
   ensureAgentsMd(folder, isMain, { rootDir });
   syncSystemSkills(folder, { rootDir });
-  ensureLegacyGroupLink(folder, { rootDir });
 
   if (options.initGit !== false) {
     ensureWorkspaceGitRepo(folder, { rootDir });

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type {
-  CreateCliGroupResult,
-  GroupRuntimeSnapshotController,
+  CreateCliWorkspaceResult,
+  RuntimeSnapshotController,
 } from "../kernel/types";
 import { log } from "../logger";
 import { WorkspaceService } from "../workspace-service";
@@ -11,9 +11,7 @@ type RouteRequest = Request & {
 };
 
 export interface DesktopApiRouter {
-  listGroups(req: Request): Response;
   listWorkspaces(req: Request): Response;
-  createCliGroup(req: Request): Promise<Response>;
   createCliWorkspace(req: Request): Promise<Response>;
   createChat(req: Request): Promise<Response>;
   getSnapshot(req: Request): Promise<Response>;
@@ -28,8 +26,7 @@ export interface DesktopApiRouter {
 
 export interface DesktopApiRouterOptions {
   workspaceService?: WorkspaceService;
-  createCliGroup?: (input: { name?: string }) => Promise<CreateCliGroupResult>;
-  createCliWorkspace?: (input: { name?: string }) => Promise<CreateCliGroupResult>;
+  createCliWorkspace?: (input: { name?: string }) => Promise<CreateCliWorkspaceResult>;
 }
 
 const TAG = "desktop-api";
@@ -135,8 +132,7 @@ function getWorkspaceIdParam(req: Request): string {
 }
 
 function getChatIdParam(req: Request): string {
-  const chatId = (req as RouteRequest).params?.chatId
-    ?? (req as RouteRequest).params?.folder;
+  const chatId = (req as RouteRequest).params?.chatId;
   if (!chatId) {
     throw new Error("Missing route param: chatId");
   }
@@ -156,7 +152,6 @@ function mapErrorStatus(error: unknown): number {
   if (
     error.message.startsWith("Workspace not found:")
     || error.message.startsWith("Chat not found:")
-    || error.message.startsWith("CLI group not found:")
   ) {
     return 404;
   }
@@ -164,7 +159,6 @@ function mapErrorStatus(error: unknown): number {
   if (
     error.message.startsWith("Branch not found:")
     || error.message.includes("requires explicit confirmation")
-    || error.message.includes("group_not_found")
   ) {
     return 400;
   }
@@ -200,7 +194,7 @@ function toErrorResponse(error: unknown): Response {
 }
 
 export function createDesktopApiRouter(
-  manager: GroupRuntimeSnapshotController & {
+  manager: RuntimeSnapshotController & {
     listBranches?: (chatId: string) => {
       currentBranch: string;
       branches: string[];
@@ -227,22 +221,17 @@ export function createDesktopApiRouter(
   options: DesktopApiRouterOptions = {},
 ): DesktopApiRouter {
   const workspaceService = options.workspaceService;
-  const createCliWorkspace = options.createCliWorkspace ?? options.createCliGroup;
+  const createCliWorkspace = options.createCliWorkspace;
 
   return {
-    listGroups() {
-      return json({
-        groups: manager.listGroups(),
-      });
-    },
-
     listWorkspaces() {
       if (!workspaceService) {
         return json({
           workspaces: [],
         });
       }
-      const summaries = manager.listGroups();
+
+      const summaries = manager.listChats();
       const summaryByChatId = new Map(summaries.map((summary) => [summary.chatId, summary]));
       const workspaces = workspaceService.listWorkspaces().map((workspace) => ({
         id: workspace.id,
@@ -282,36 +271,25 @@ export function createDesktopApiRouter(
           await req.json().catch(() => ({})),
         );
         requestedName = body.name ?? null;
-        log.info(TAG, "Received desktop createCliGroup request", {
+        log.info(TAG, "Received desktop createCliWorkspace request", {
           ...getRequestMeta(req),
           requestedName,
         });
         const result = await createCliWorkspace(body);
-        const legacyGroup = (result as { group?: { folder: string; name: string } }).group;
-        const createdSummary = "summary" in result
-          ? result.summary
-          : {
-              folder: legacyGroup?.folder ?? "",
-              name: legacyGroup?.name ?? "",
-            };
-        log.info(TAG, "Desktop createCliGroup succeeded", {
+        log.info(TAG, "Desktop createCliWorkspace succeeded", {
           ...getRequestMeta(req),
           requestedName,
           status: 201,
-          groupFolder: createdSummary.folder,
-          groupName: createdSummary.name,
+          workspaceFolder: result.summary.workspaceFolder,
+          workspaceName: result.summary.workspaceName,
         });
         return json(result, 201);
       } catch (error) {
-        logRouteError("createCliGroup", req, error, {
+        logRouteError("createCliWorkspace", req, error, {
           requestedName,
         });
         return toErrorResponse(error);
       }
-    },
-
-    async createCliGroup(req) {
-      return this.createCliWorkspace(req);
     },
 
     async createChat(req) {
@@ -360,8 +338,7 @@ export function createDesktopApiRouter(
     async abort(req) {
       try {
         const chatId = getChatIdParam(req);
-        const snapshot = await manager.abort(chatId);
-        return json(snapshot);
+        return json(await manager.abort(chatId));
       } catch (error) {
         return toErrorResponse(error);
       }
@@ -370,8 +347,7 @@ export function createDesktopApiRouter(
     async newSession(req) {
       try {
         const chatId = getChatIdParam(req);
-        const snapshot = await manager.newSession(chatId);
-        return json(snapshot);
+        return json(await manager.newSession(chatId));
       } catch (error) {
         return toErrorResponse(error);
       }
@@ -380,56 +356,25 @@ export function createDesktopApiRouter(
     async getEvents(req) {
       try {
         const chatId = getChatIdParam(req);
-        const initialSnapshot = await manager.getSnapshot(chatId);
-        const encoder = new TextEncoder();
-
-        let unsubscribe: () => void = () => undefined;
-        let closed = false;
-
-        const close = (controller: ReadableStreamDefaultController<Uint8Array>) => {
-          if (closed) {
-            return;
-          }
-
-          closed = true;
-          unsubscribe();
-          controller.close();
-        };
-
-        const stream = new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(
-              encoder.encode(formatSseEvent("snapshot", {
-                type: "snapshot",
-                snapshot: initialSnapshot,
-              })),
-            );
-
-            unsubscribe = manager.subscribe(chatId, (event) => {
-              if (closed) {
-                return;
-              }
-
-              controller.enqueue(
-                encoder.encode(formatSseEvent(event.type, event)),
-              );
+        const stream = new ReadableStream({
+          start: (controller) => {
+            controller.enqueue(formatSseEvent("ready", { ok: true }));
+            const unsubscribe = manager.subscribe(chatId, (event) => {
+              controller.enqueue(formatSseEvent(event.type, event));
             });
-
-            req.signal.addEventListener("abort", () => close(controller), {
-              once: true,
-            });
-          },
-          cancel() {
-            unsubscribe();
-            closed = true;
+            const signal = (req as Request).signal;
+            signal.addEventListener("abort", () => {
+              unsubscribe();
+              controller.close();
+            }, { once: true });
           },
         });
 
         return new Response(stream, {
           headers: {
+            "content-type": "text/event-stream",
             "cache-control": "no-cache",
             connection: "keep-alive",
-            "content-type": "text/event-stream",
           },
         });
       } catch (error) {
@@ -442,6 +387,7 @@ export function createDesktopApiRouter(
         if (!manager.listBranches) {
           return errorResponse(501, "not_implemented", "listBranches is unavailable");
         }
+
         const chatId = getChatIdParam(req);
         return json(manager.listBranches(chatId));
       } catch (error) {
@@ -454,13 +400,10 @@ export function createDesktopApiRouter(
         if (!manager.switchBranch) {
           return errorResponse(501, "not_implemented", "switchBranch is unavailable");
         }
+
         const chatId = getChatIdParam(req);
         const body = switchBranchSchema.parse(await req.json());
-        const snapshot = await manager.switchBranch(chatId, body.branch, {
-          confirm: body.confirm,
-          allowDirty: body.allowDirty,
-        });
-        return json(snapshot);
+        return json(await manager.switchBranch(chatId, body.branch, body));
       } catch (error) {
         return toErrorResponse(error);
       }
@@ -471,14 +414,10 @@ export function createDesktopApiRouter(
         if (!manager.forkBranch) {
           return errorResponse(501, "not_implemented", "forkBranch is unavailable");
         }
+
         const chatId = getChatIdParam(req);
         const body = forkBranchSchema.parse(await req.json());
-        const snapshot = await manager.forkBranch(chatId, body.branch, {
-          confirm: body.confirm,
-          fromBranch: body.fromBranch,
-          allowDirty: body.allowDirty,
-        });
-        return json(snapshot);
+        return json(await manager.forkBranch(chatId, body.branch, body));
       } catch (error) {
         return toErrorResponse(error);
       }

@@ -6,7 +6,7 @@ import {
   SessionManager,
   type AgentSessionRuntime,
 } from "@mariozechner/pi-coding-agent";
-import { getSessionRef, initDatabase, saveSessionRef } from "../src/db";
+import { initDatabase } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { OctoCliRuntimeHost } from "../src/cli/octo-cli-runtime-host";
 import { CliStateStore } from "../src/cli/state-store";
@@ -57,7 +57,6 @@ function createSessionFile(cwd: string, sessionId: string): string {
 function createFakeRuntime(initialSessionPath: string, initialCwd: string): {
   runtime: AgentSessionRuntime;
   calls: {
-    switchSession: Array<{ sessionPath: string; cwdOverride?: string }>;
     importFromJsonl: Array<{ inputPath: string; cwdOverride?: string }>;
   };
 } {
@@ -87,7 +86,6 @@ function createFakeRuntime(initialSessionPath: string, initialCwd: string): {
     cwd: initialCwd,
   };
   const calls = {
-    switchSession: [] as Array<{ sessionPath: string; cwdOverride?: string }>,
     importFromJsonl: [] as Array<{ inputPath: string; cwdOverride?: string }>,
   };
   const runtime = {
@@ -98,15 +96,6 @@ function createFakeRuntime(initialSessionPath: string, initialCwd: string): {
     modelFallbackMessage: undefined,
     newSession: async () => ({ cancelled: false }),
     fork: async () => ({ cancelled: false }),
-    switchSession: async (sessionPath: string, cwdOverride?: string) => {
-      calls.switchSession.push({ sessionPath, cwdOverride });
-      session.sessionFile = sessionPath;
-      const nextCwd = cwdOverride ?? runtimeState.cwd;
-      services.cwd = nextCwd;
-      runtimeState.cwd = nextCwd;
-      runtime.cwd = nextCwd;
-      return { cancelled: false };
-    },
     importFromJsonl: async (inputPath: string, cwdOverride?: string) => {
       calls.importFromJsonl.push({ inputPath, cwdOverride });
       const nextCwd = cwdOverride ?? runtimeState.cwd;
@@ -134,72 +123,6 @@ function createNoopMessageSender(): MessageSender {
 }
 
 describe("OctoCliRuntimeHost", () => {
-  test("rejects switchSession outside Octo registered groups", async () => {
-    const rootDir = mkdtempSync(join(tmpdir(), "octo-cli-runtime-host-"));
-    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
-
-    try {
-      const configPath = createProfilesConfig(rootDir);
-      process.env.AGENT_PROFILES_PATH = configPath;
-      const db = initDatabase(join(rootDir, "store", "messages.db"));
-      const groupService = new GroupService(db, { rootDir });
-      const workspaceService = new WorkspaceService(db, { rootDir });
-      const currentGroup = groupService.createCliGroup({ name: "Current" });
-      const currentWorkspace = workspaceService.getWorkspaceByFolder(currentGroup.folder);
-      if (!currentWorkspace) {
-        throw new Error("Current workspace missing");
-      }
-      const currentChat = workspaceService.listChats(currentWorkspace.id)[0];
-      if (!currentChat) {
-        throw new Error("Current chat missing");
-      }
-      const currentCwd = join(rootDir, "groups", currentGroup.folder);
-      const currentSessionPath = createSessionFile(currentCwd, "current");
-      const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const current = createFakeRuntime(currentSessionPath, currentCwd);
-      const manager = new GroupRuntimeManager({
-        db,
-        workspaceService,
-        rootDir,
-        createMessageSender: () => createNoopMessageSender(),
-        createGroupRuntime: async (groupFolder) => {
-          if (groupFolder !== currentGroup.folder) {
-            throw new Error(`Unexpected test group: ${groupFolder}`);
-          }
-
-          return {
-            group: currentGroup,
-            runtime: current.runtime,
-            sessionRef: currentSessionPath,
-          };
-        },
-      });
-      const host = new OctoCliRuntimeHost({
-        manager,
-        stateStore,
-        currentWorkspace,
-        currentChat,
-        currentGroup,
-        runtime: current.runtime,
-      });
-
-      const outsideCwd = join(rootDir, "outside");
-      mkdirSync(outsideCwd, { recursive: true });
-      const outsideSessionPath = createSessionFile(outsideCwd, "outside");
-
-      await expect(host.switchSession(outsideSessionPath)).rejects.toThrow(
-        "Session is outside Octo registered workspaces",
-      );
-    } finally {
-      if (previousProfilesPath === undefined) {
-        delete process.env.AGENT_PROFILES_PATH;
-      } else {
-        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
-      }
-      rmSync(rootDir, { recursive: true, force: true });
-    }
-  });
-
   test("switchGroup updates current group, session ref, and state store", async () => {
     const rootDir = mkdtempSync(join(tmpdir(), "octo-cli-runtime-host-"));
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
@@ -226,7 +149,7 @@ describe("OctoCliRuntimeHost", () => {
       const secondCwd = join(rootDir, "groups", secondGroup.folder);
       const firstSessionPath = createSessionFile(firstCwd, "first");
       const secondSessionPath = createSessionFile(secondCwd, "second");
-      saveSessionRef(db, secondGroup.folder, secondSessionPath);
+      workspaceService.updateChat(secondChat.id, { sessionRef: secondSessionPath });
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
       const first = createFakeRuntime(firstSessionPath, firstCwd);
       const second = createFakeRuntime(secondSessionPath, secondCwd);
@@ -270,7 +193,7 @@ describe("OctoCliRuntimeHost", () => {
       expect(host.getCurrentWorkspace().folder).toBe(secondGroup.folder);
       expect(host.getCurrentChat().id).toBe(secondChat.id);
       expect(host.session.sessionFile).toBe(secondSessionPath);
-      expect(getSessionRef(db, secondGroup.folder)).toBe(secondSessionPath);
+      expect(workspaceService.getChatById(secondChat.id)?.session_ref).toBe(secondSessionPath);
       expect(stateStore.getCurrentGroupFolder()).toBe(secondGroup.folder);
       expect(stateStore.getCurrentWorkspaceFolder()).toBe(secondGroup.folder);
       expect(stateStore.getCurrentChatId()).toBe(secondChat.id);

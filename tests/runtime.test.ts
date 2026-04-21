@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDatabase, saveSessionRef, updateGroupProfile } from "../src/db";
+import { initDatabase, registerGroup, updateGroupProfile } from "../src/db";
 import { resolvePersistedPiSessionRef } from "../src/providers/pi-session-ref";
 import {
   listAgentProfiles,
@@ -13,6 +13,7 @@ import {
   resolveMiniMaxTokenPlanMcpConfig,
 } from "../src/runtime/minimax-token-plan-mcp";
 import { anthropicToOpenAI, openAIToAnthropic } from "../src/runtime/openai-transform";
+import { WorkspaceService } from "../src/workspace-service";
 
 const originalEnv = { ...process.env };
 
@@ -249,22 +250,29 @@ describe("openai compatibility transforms", () => {
 });
 
 describe("db session retention on profile switch", () => {
-  test("updateGroupProfile keeps existing session rows", () => {
+  test("updateGroupProfile keeps existing chat session refs", () => {
     const db = initDatabase(":memory:");
-    db.query(
-      `INSERT INTO registered_groups (
-        jid, name, folder, channel_type, trigger_pattern, added_at, requires_trigger, is_main, profile_key
-      ) VALUES ('jid-1', 'Test', 'group-1', 'feishu', '', '2026-03-24T00:00:00.000Z', 1, 0, 'claude')`,
-    ).run();
+    registerGroup(db, {
+      jid: "jid-1",
+      name: "Test",
+      folder: "group-1",
+      channelType: "feishu",
+      profileKey: "claude",
+    });
 
-    saveSessionRef(db, "group-1", "session-1");
+    const workspaceService = new WorkspaceService(db);
+    const workspace = workspaceService.getWorkspaceByFolder("group-1");
+    if (!workspace) {
+      throw new Error("workspace missing");
+    }
+    const chat = workspaceService.listChats(workspace.id)[0];
+    if (!chat) {
+      throw new Error("chat missing");
+    }
+    workspaceService.updateChat(chat.id, { sessionRef: "session-1" });
     updateGroupProfile(db, "group-1", "codex");
 
-    const row = db
-      .query("SELECT session_ref FROM sessions WHERE group_folder = 'group-1'")
-      .get() as { session_ref: string } | null;
-
-    expect(row?.session_ref).toBe("session-1");
+    expect(workspaceService.getChatById(chat.id)?.session_ref).toBe("session-1");
   });
 });
 

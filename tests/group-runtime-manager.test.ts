@@ -167,7 +167,6 @@ function createFakeRuntime(initialCwd: string): {
     modelFallbackMessage: undefined,
     newSession: async () => ({ cancelled: false }),
     fork: async () => ({ cancelled: false }),
-    switchSession: async () => ({ cancelled: false }),
     importFromJsonl: async () => ({ cancelled: false }),
     dispose: async () => {},
   };
@@ -188,6 +187,83 @@ function createFakeRuntime(initialCwd: string): {
 }
 
 describe("GroupRuntimeManager", () => {
+  test("updates only the active chat session ref inside a shared workspace", async () => {
+    const workspace = createWorkspace();
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      process.env.AGENT_PROFILES_PATH = workspace.configPath;
+      const workspaceService = new WorkspaceService(workspace.db, {
+        rootDir: workspace.dir,
+      });
+      const workspaceRow = workspaceService.getWorkspaceByFolder("main");
+      if (!workspaceRow) {
+        throw new Error("workspace missing");
+      }
+
+      const firstChat = workspaceService.listChats(workspaceRow.id)[0];
+      if (!firstChat) {
+        throw new Error("first chat missing");
+      }
+
+      const secondChat = workspaceService.createChat(workspaceRow.id, {
+        title: "Second",
+        requiresTrigger: false,
+      });
+      const secondInitialSessionRef = secondChat.session_ref;
+      const cwd = join(workspace.dir, "groups", "main");
+      const firstRuntime = createFakeRuntime(cwd);
+      const secondRuntime = createFakeRuntime(cwd);
+      const manager = new GroupRuntimeManager({
+        db: workspace.db,
+        workspaceService,
+        rootDir: workspace.dir,
+        createMessageSender: () => createNoopMessageSender(),
+        createChatRuntime: async (chatId) => {
+          if (chatId === firstChat.id) {
+            return {
+              workspace: workspaceRow,
+              chat: workspaceService.getChatById(firstChat.id)!,
+              runtime: firstRuntime.runtime,
+              sessionRef: workspaceService.getChatById(firstChat.id)?.session_ref ?? null,
+            };
+          }
+
+          if (chatId === secondChat.id) {
+            return {
+              workspace: workspaceRow,
+              chat: workspaceService.getChatById(secondChat.id)!,
+              runtime: secondRuntime.runtime,
+              sessionRef: workspaceService.getChatById(secondChat.id)?.session_ref ?? null,
+            };
+          }
+
+          throw new Error(`Unexpected chat: ${chatId}`);
+        },
+      });
+
+      await manager.getSnapshot(firstChat.id);
+      const updatedSessionRef = join(cwd, ".pi", "sessions", "first-updated.jsonl");
+      firstRuntime.runtime.session.sessionFile = updatedSessionRef;
+      firstRuntime.emit({
+        type: "message_end",
+        message: createAssistantMessage("done"),
+      });
+
+      expect(workspaceService.getChatById(firstChat.id)?.session_ref).toBe(updatedSessionRef);
+      expect(workspaceService.getChatById(secondChat.id)?.session_ref).toBe(
+        secondInitialSessionRef,
+      );
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(workspace.dir, { recursive: true, force: true });
+    }
+  });
+
   test("builds renderable snapshots from session history", async () => {
     const workspace = createWorkspace();
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;

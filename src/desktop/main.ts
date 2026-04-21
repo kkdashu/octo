@@ -7,7 +7,6 @@ import { createDesktopAdminApiRouter, type DesktopAdminApiRouter } from "./admin
 import { createDesktopApiRouter, type DesktopApiRouter } from "./api";
 import { startDesktopServer } from "./server";
 import { initDatabase } from "../db";
-import { GroupService } from "../group-service";
 import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
 import { log } from "../logger";
 import { WorkspaceService } from "../workspace-service";
@@ -24,7 +23,6 @@ export interface DesktopSidecarOptions {
 export interface DesktopSidecarHandle {
   rootDir: string;
   db: Database;
-  groupService: GroupService;
   workspaceService: WorkspaceService;
   channelManager: ChannelManager;
   manager: GroupRuntimeManager;
@@ -96,10 +94,9 @@ export async function startDesktopSidecar(
   ensureAgentProfilesPath(rootDir);
 
   const db = initDatabase(dbPath);
-  const groupService = new GroupService(db, { rootDir });
   const workspaceService = new WorkspaceService(db, { rootDir });
-  for (const group of groupService.listGroups()) {
-    groupService.ensureWorkspace(group);
+  for (const workspace of workspaceService.listWorkspaces()) {
+    workspaceService.ensureWorkspaceDirectory(workspace);
   }
 
   const channelManager = new ChannelManager(db);
@@ -115,32 +112,16 @@ export async function startDesktopSidecar(
   const api = createDesktopApiRouter(manager, {
     workspaceService,
     createCliWorkspace: async ({ name }) => {
-      const created = groupService.createCliGroup({
-        name,
-      });
-      log.info(TAG, "Created desktop CLI group", {
-        folder: created.folder,
-        name: created.name,
-        profileKey: created.profile_key,
-      });
-      const workspace = workspaceService.getWorkspaceByFolder(created.folder);
-      if (!workspace) {
-        throw new Error(`Failed to expose newly created workspace: ${created.folder}`);
-      }
-      const chat = workspaceService.listChats(workspace.id)[0] ?? null;
-      if (!chat) {
-        throw new Error(`Failed to expose newly created chat: ${created.folder}`);
-      }
-      const summary = manager.listGroups().find((item) => item.chatId === chat.id);
+      const created = workspaceService.createCliWorkspace({ name });
+      const summary = manager.listChats().find((item) => item.chatId === created.chat.id);
       if (!summary) {
-        throw new Error(`Failed to expose newly created chat summary: ${chat.id}`);
+        throw new Error(`Failed to expose newly created chat summary: ${created.chat.id}`);
       }
-      const snapshot = await manager.getSnapshot(chat.id);
+      const snapshot = await manager.getSnapshot(created.chat.id);
       return {
-        workspace,
-        chat,
+        workspace: created.workspace,
+        chat: created.chat,
         summary,
-        group: summary,
         snapshot,
       };
     },
@@ -157,7 +138,6 @@ export async function startDesktopSidecar(
   return {
     rootDir,
     db,
-    groupService,
     workspaceService,
     channelManager,
     manager,
@@ -180,7 +160,7 @@ export async function startDesktopSidecar(
 
 function attachShutdownHandlers(handle: DesktopSidecarHandle): void {
   const shutdown = async (signal: string) => {
-    log.info(TAG, `Shutting down desktop sidecar`, {
+    log.info(TAG, "Shutting down desktop sidecar", {
       signal,
       url: handle.server.url.toString(),
     });
