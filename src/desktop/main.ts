@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChannelManager } from "../channels/manager";
 import { createCliMessageSender, registerOutboundFeishuChannel } from "../cli";
@@ -9,6 +8,7 @@ import { startDesktopServer } from "./server";
 import { initDatabase } from "../db";
 import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
 import { log } from "../logger";
+import { ensureAgentProfilesPath } from "../runtime/profile-config";
 import { WorkspaceService } from "../workspace-service";
 
 const TAG = "desktop-main";
@@ -48,25 +48,6 @@ function parsePort(value: string | undefined): number | undefined {
   }
 
   return port;
-}
-
-function ensureAgentProfilesPath(rootDir: string): void {
-  const configured = process.env.AGENT_PROFILES_PATH?.trim();
-  const resolvedConfigured = configured ? resolve(configured) : null;
-  if (resolvedConfigured && existsSync(resolvedConfigured)) {
-    process.env.AGENT_PROFILES_PATH = resolvedConfigured;
-    return;
-  }
-
-  const fallbackPath = resolve(rootDir, "config/agent-profiles.json");
-  if (configured) {
-    log.warn(TAG, "AGENT_PROFILES_PATH is invalid for desktop sidecar, falling back to root config", {
-      configuredPath: resolve(configured),
-      fallbackPath,
-    });
-  }
-
-  process.env.AGENT_PROFILES_PATH = fallbackPath;
 }
 
 export function resolveDesktopSidecarOptionsFromEnv(): DesktopSidecarOptions {

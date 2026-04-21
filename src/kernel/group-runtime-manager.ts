@@ -512,15 +512,6 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     throw new Error(`Chat not found: ${chatOrWorkspaceId}`);
   }
 
-  private getWorkspaceForChat(chat: ChatRow): WorkspaceRow {
-    const workspace = this.workspaceService.getWorkspaceById(chat.workspace_id);
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${chat.workspace_id}`);
-    }
-
-    return workspace;
-  }
-
   private async ensureManagedRuntime(
     chatOrWorkspaceId: string,
   ): Promise<ManagedChatRuntime> {

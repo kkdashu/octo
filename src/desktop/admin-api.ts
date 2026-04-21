@@ -21,8 +21,6 @@ import {
   writeWorkspaceTextFile,
 } from "./admin-files";
 import type {
-  DesktopAdminDirectoryListingDto,
-  DesktopAdminFileContentDto,
   DesktopAdminProfileOption,
   DesktopAdminWorkspaceDetailResponse,
   DesktopAdminWorkspaceDto,

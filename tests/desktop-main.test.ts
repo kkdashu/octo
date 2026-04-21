@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { initDatabase, registerGroup } from "../src/db";
+import { join } from "node:path";
+import { initDatabase } from "../src/db";
 import {
   resolveDesktopSidecarOptionsFromEnv,
   startDesktopSidecar,
 } from "../src/desktop/main";
 import { DESKTOP_HOSTNAME } from "../src/desktop/server";
+import { WorkspaceService } from "../src/workspace-service";
 
 function createWorkspace() {
   const dir = join(tmpdir(), `octo-desktop-main-${crypto.randomUUID()}`);
@@ -32,14 +33,20 @@ function createWorkspace() {
   );
 
   const db = initDatabase(join(dir, "store", "messages.db"));
-  registerGroup(db, {
-    jid: "cli:test-group",
+  const workspaceService = new WorkspaceService(db, { rootDir: dir });
+  const workspace = workspaceService.createWorkspace({
     name: "Desktop Group",
     folder: "desktop-group",
-    channelType: "cli",
-    requiresTrigger: false,
-    isMain: false,
     profileKey: "claude",
+    isMain: false,
+  });
+  workspaceService.createChat(workspace.id, {
+    title: "Desktop Group",
+    requiresTrigger: false,
+    externalBinding: {
+      platform: "cli",
+      externalChatId: "cli:desktop-group",
+    },
   });
   db.close(false);
 
@@ -144,12 +151,12 @@ describe("desktop sidecar bootstrap", () => {
   });
 
   test("normalizes relative AGENT_PROFILES_PATH to an absolute path", async () => {
-    const { dir } = createWorkspace();
+    const { dir, configPath } = createWorkspace();
     cleanupDirs.push(dir);
     const previousCwd = process.cwd();
     process.chdir(dir);
     process.env.AGENT_PROFILES_PATH = "config/agent-profiles.json";
-    const expectedProfilesPath = resolve("config/agent-profiles.json");
+    const expectedProfilesPath = configPath;
 
     const originalServe = Bun.serve;
     const bunObject = Bun as unknown as {
@@ -224,22 +231,22 @@ describe("desktop sidecar bootstrap", () => {
       expect(capturedHostname).toBe(DESKTOP_HOSTNAME);
       expect(capturedPort).toBe(4319);
       expect(handle.server.url.hostname).toBe(DESKTOP_HOSTNAME);
-      expect(handle.groupService.listGroups().map((group) => group.folder)).toEqual([
+      expect(handle.workspaceService.listWorkspaces().map((workspace) => workspace.folder)).toEqual([
         "desktop-group",
       ]);
-      const adminListResponse = handle.adminApi.listGroups(
+      const adminListResponse = handle.adminApi.listWorkspaces(
         new Request("http://localhost/api/desktop/admin/groups"),
       );
       expect(adminListResponse.status).toBe(200);
       expect(await adminListResponse.json()).toMatchObject({
-        groups: [
+        workspaces: [
           expect.objectContaining({
             folder: "desktop-group",
           }),
         ],
       });
 
-      const workspacePath = join(dir, "groups", "desktop-group");
+      const workspacePath = join(dir, "workspaces", "desktop-group");
       expect(existsSync(workspacePath)).toBe(true);
 
       await handle.stop();

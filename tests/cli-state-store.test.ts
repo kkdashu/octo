@@ -12,17 +12,14 @@ describe("cli state store", () => {
       const filePath = join(rootDir, "cli-state.json");
       const store = new CliStateStore(filePath);
 
-      expect(store.getCurrentGroupFolder()).toBeNull();
       expect(store.getCurrentWorkspaceFolder()).toBeNull();
       expect(store.getCurrentChatId()).toBeNull();
 
       store.setCurrentChat("chat_cli_demo", "cli_20260418_demo");
-      expect(store.getCurrentGroupFolder()).toBe("cli_20260418_demo");
       expect(store.getCurrentWorkspaceFolder()).toBe("cli_20260418_demo");
       expect(store.getCurrentChatId()).toBe("chat_cli_demo");
 
       store.clear();
-      expect(store.getCurrentGroupFolder()).toBeNull();
       expect(store.getCurrentWorkspaceFolder()).toBeNull();
       expect(store.getCurrentChatId()).toBeNull();
     } finally {
@@ -38,7 +35,6 @@ describe("cli state store", () => {
       writeFileSync(filePath, "{ invalid json");
 
       const store = new CliStateStore(filePath);
-      expect(store.getCurrentGroupFolder()).toBeNull();
       expect(store.getCurrentWorkspaceFolder()).toBeNull();
       expect(store.getCurrentChatId()).toBeNull();
     } finally {

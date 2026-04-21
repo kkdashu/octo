@@ -13,18 +13,26 @@ afterEach(() => {
 
 function createApi(): DesktopApiRouter {
   return {
-    listGroups() {
-      return Response.json({ groups: [] });
+    listWorkspaces() {
+      return Response.json({ workspaces: [] });
     },
-    async createCliGroup() {
+    async createCliWorkspace() {
+      return Response.json({ ok: true }, { status: 201 });
+    },
+    async createChat() {
       return Response.json({ ok: true }, { status: 201 });
     },
     async getSnapshot() {
       return Response.json({
-        groupFolder: "main",
-        groupName: "Main Group",
+        workspaceId: "ws_1",
+        workspaceFolder: "main",
+        workspaceName: "Main Workspace",
+        chatId: "chat_1",
+        chatTitle: "Main Chat",
+        activeBranch: "main",
         profileKey: "claude",
         sessionRef: null,
+        currentRunId: null,
         isStreaming: false,
         pendingFollowUp: [],
         pendingSteering: [],
@@ -47,32 +55,44 @@ function createApi(): DesktopApiRouter {
         },
       });
     },
+    async listBranches() {
+      return Response.json({
+        currentBranch: "main",
+        branches: ["main"],
+        isDirty: false,
+      });
+    },
+    async switchBranch() {
+      return Response.json({ ok: true });
+    },
+    async forkBranch() {
+      return Response.json({ ok: true });
+    },
   };
 }
 
 function createAdminApi(): DesktopAdminApiRouter {
   return {
-    listGroups() {
-      return Response.json({ groups: [], availableProfiles: [] });
+    listWorkspaces() {
+      return Response.json({ workspaces: [], availableProfiles: [] });
     },
-    getGroup() {
+    getWorkspace() {
       return Response.json({
-        group: {
-          jid: "oc_test",
-          name: "Test Group",
-          folder: "test-group",
-          channelType: "feishu",
+        workspace: {
+          id: "ws_1",
+          name: "Test Workspace",
+          folder: "test-workspace",
           triggerPattern: "@octo",
           requiresTrigger: true,
           isMain: false,
           profileKey: "claude",
-          addedAt: "2026-04-19T00:00:00.000Z",
+          createdAt: "2026-04-19T00:00:00.000Z",
         },
         availableProfiles: [],
         memories: [],
       });
     },
-    async patchGroup() {
+    async patchWorkspace() {
       return Response.json({ ok: true });
     },
     async putMemory() {
@@ -110,7 +130,7 @@ describe("desktop server", () => {
     servers.push(server);
 
     const origin = "http://127.0.0.1:1420";
-    const listResponse = await fetch(`${server.url}api/desktop/groups`, {
+    const listResponse = await fetch(`${server.url}api/desktop/workspaces`, {
       headers: {
         Origin: origin,
       },
@@ -119,26 +139,32 @@ describe("desktop server", () => {
     expect(listResponse.headers.get("access-control-allow-origin")).toBe(origin);
     expect(listResponse.headers.get("access-control-allow-methods")).toContain("OPTIONS");
 
-    const preflightResponse = await fetch(`${server.url}api/desktop/groups/main/prompt`, {
+    const preflightResponse = await fetch(
+      `${server.url}api/desktop/workspaces/ws_1/chats/chat_1/prompt`,
+      {
       method: "OPTIONS",
       headers: {
         Origin: origin,
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "content-type",
       },
-    });
+    },
+    );
     expect(preflightResponse.status).toBe(204);
     expect(preflightResponse.headers.get("access-control-allow-origin")).toBe(origin);
     expect(preflightResponse.headers.get("access-control-allow-headers")).toContain("Content-Type");
 
-    const adminPreflight = await fetch(`${server.url}api/desktop/admin/groups/test-group`, {
+    const adminPreflight = await fetch(
+      `${server.url}api/desktop/admin/workspaces/test-workspace`,
+      {
       method: "OPTIONS",
       headers: {
         Origin: origin,
         "Access-Control-Request-Method": "PATCH",
         "Access-Control-Request-Headers": "content-type",
       },
-    });
+    },
+    );
     expect(adminPreflight.status).toBe(204);
     expect(adminPreflight.headers.get("access-control-allow-methods")).toContain("PATCH");
     expect(adminPreflight.headers.get("access-control-allow-methods")).toContain("DELETE");
@@ -154,11 +180,14 @@ describe("desktop server", () => {
     servers.push(server);
 
     const origin = "http://127.0.0.1:1420";
-    const response = await fetch(`${server.url}api/desktop/groups/main/events`, {
+    const response = await fetch(
+      `${server.url}api/desktop/workspaces/ws_1/chats/chat_1/events`,
+      {
       headers: {
         Origin: origin,
       },
-    });
+    },
+    );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(response.headers.get("access-control-allow-origin")).toBe(origin);
@@ -174,7 +203,7 @@ describe("desktop server", () => {
     servers.push(server);
 
     const origin = "http://127.0.0.1:1420";
-    const response = await fetch(`${server.url}api/desktop/admin/groups`, {
+    const response = await fetch(`${server.url}api/desktop/admin/workspaces`, {
       headers: {
         Origin: origin,
       },
@@ -183,7 +212,7 @@ describe("desktop server", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBe(origin);
     expect(await response.json()).toEqual({
-      groups: [],
+      workspaces: [],
       availableProfiles: [],
     });
   });

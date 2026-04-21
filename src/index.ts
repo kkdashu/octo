@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import {
   initDatabase,
   insertInboundMessage,
@@ -10,17 +11,22 @@ import {
   MiniMaxTokenPlanMcpClient,
   resolveMiniMaxTokenPlanMcpConfig,
 } from "./runtime/minimax-token-plan-mcp";
-import { loadAgentProfilesConfig } from "./runtime/profile-config";
+import {
+  ensureAgentProfilesPath,
+  loadAgentProfilesConfig,
+} from "./runtime/profile-config";
 import { startMessageLoop } from "./router";
 import { startScheduler } from "./task-scheduler";
 import { log } from "./logger";
 import { WorkspaceService } from "./workspace-service";
 
 const TAG = "main";
+const rootDir = process.cwd();
 
 log.info(TAG, "Initializing database at store/messages.db");
-const db = initDatabase("store/messages.db");
-const workspaceService = new WorkspaceService(db);
+ensureAgentProfilesPath(rootDir);
+const db = initDatabase(resolve(rootDir, "store/messages.db"));
+const workspaceService = new WorkspaceService(db, { rootDir });
 
 for (const workspace of workspaceService.listWorkspaces()) {
   workspaceService.ensureWorkspaceDirectory(workspace);

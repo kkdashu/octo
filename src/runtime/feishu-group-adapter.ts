@@ -3,7 +3,6 @@ import {
   appendRunEvent,
   createTurnRequest,
   createRun,
-  getChatById,
   getTurnRequestById,
   listChatBindingsForChat,
   type TurnRequestRow,

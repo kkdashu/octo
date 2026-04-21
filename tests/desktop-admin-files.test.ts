@@ -3,17 +3,17 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createGroupDirectory,
+  createWorkspaceDirectory,
   DesktopAdminFileError,
-  listGroupDirectory,
-  readGroupTextFile,
-  resolveGroupPath,
-  writeGroupTextFile,
+  listWorkspaceDirectory,
+  readWorkspaceTextFile,
+  resolveWorkspacePath,
+  writeWorkspaceTextFile,
 } from "../src/desktop/admin-files";
 
-function createWorkspace() {
+function createRootDir() {
   const dir = join(tmpdir(), `octo-desktop-admin-files-${crypto.randomUUID()}`);
-  mkdirSync(join(dir, "groups", "test-group"), { recursive: true });
+  mkdirSync(join(dir, "workspaces", "test-workspace"), { recursive: true });
   return dir;
 }
 
@@ -28,14 +28,14 @@ afterEach(() => {
   }
 });
 
-describe("desktop admin group file helpers", () => {
-  test("lists and reads files inside the group root", () => {
-    const rootDir = createWorkspace();
+describe("desktop admin workspace file helpers", () => {
+  test("lists and reads files inside the workspace root", () => {
+    const rootDir = createRootDir();
     cleanupDirs.push(rootDir);
-    writeFileSync(join(rootDir, "groups", "test-group", "AGENTS.md"), "# Hello\n", "utf-8");
+    writeFileSync(join(rootDir, "workspaces", "test-workspace", "AGENTS.md"), "# Hello\n", "utf-8");
 
-    const listing = listGroupDirectory("test-group", ".", rootDir);
-    const file = readGroupTextFile("test-group", "AGENTS.md", rootDir);
+    const listing = listWorkspaceDirectory("test-workspace", ".", rootDir);
+    const file = readWorkspaceTextFile("test-workspace", "AGENTS.md", rootDir);
 
     expect(listing.path).toBe(".");
     expect(listing.entries).toEqual([
@@ -44,50 +44,56 @@ describe("desktop admin group file helpers", () => {
     expect(file.content).toBe("# Hello\n");
   });
 
-  test("rejects directory traversal outside group root", () => {
-    const rootDir = createWorkspace();
+  test("rejects directory traversal outside workspace root", () => {
+    const rootDir = createRootDir();
     cleanupDirs.push(rootDir);
 
-    expect(() => resolveGroupPath("test-group", "../outside.txt", rootDir)).toThrow(DesktopAdminFileError);
+    expect(() => resolveWorkspacePath("test-workspace", "../outside.txt", rootDir)).toThrow(
+      DesktopAdminFileError,
+    );
   });
 
   test("rejects reading a directory as a file", () => {
-    const rootDir = createWorkspace();
+    const rootDir = createRootDir();
     cleanupDirs.push(rootDir);
-    mkdirSync(join(rootDir, "groups", "test-group", "nested"), { recursive: true });
+    mkdirSync(join(rootDir, "workspaces", "test-workspace", "nested"), { recursive: true });
 
-    expect(() => readGroupTextFile("test-group", "nested", rootDir)).toThrow(DesktopAdminFileError);
+    expect(() => readWorkspaceTextFile("test-workspace", "nested", rootDir)).toThrow(
+      DesktopAdminFileError,
+    );
   });
 
-  test("writes files only inside the group root", () => {
-    const rootDir = createWorkspace();
+  test("writes files only inside the workspace root", () => {
+    const rootDir = createRootDir();
     cleanupDirs.push(rootDir);
-    writeGroupTextFile("test-group", "notes/todo.md", "line 1", {
+    writeWorkspaceTextFile("test-workspace", "notes/todo.md", "line 1", {
       createParents: true,
       rootDir,
     });
 
-    const file = readGroupTextFile("test-group", "notes/todo.md", rootDir);
+    const file = readWorkspaceTextFile("test-workspace", "notes/todo.md", rootDir);
     expect(file.content).toBe("line 1");
 
-    expect(() => writeGroupTextFile("test-group", "../hack.txt", "bad", {
+    expect(() => writeWorkspaceTextFile("test-workspace", "../hack.txt", "bad", {
       createParents: true,
       rootDir,
     })).toThrow(DesktopAdminFileError);
   });
 
   test("creates directories and rejects non-utf8 files", () => {
-    const rootDir = createWorkspace();
+    const rootDir = createRootDir();
     cleanupDirs.push(rootDir);
 
-    const created = createGroupDirectory("test-group", "docs/specs", rootDir);
+    const created = createWorkspaceDirectory("test-workspace", "docs/specs", rootDir);
     expect(created.path).toBe("docs/specs");
 
     writeFileSync(
-      join(rootDir, "groups", "test-group", "binary.bin"),
+      join(rootDir, "workspaces", "test-workspace", "binary.bin"),
       Buffer.from([0xff, 0xfe, 0xfd]),
     );
 
-    expect(() => readGroupTextFile("test-group", "binary.bin", rootDir)).toThrow(DesktopAdminFileError);
+    expect(() => readWorkspaceTextFile("test-workspace", "binary.bin", rootDir)).toThrow(
+      DesktopAdminFileError,
+    );
   });
 });

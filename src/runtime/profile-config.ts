@@ -31,20 +31,48 @@ type CachedConfig = {
 };
 
 let cachedConfig: CachedConfig | null = null;
+let agentProfilesRootDir: string | null = null;
 const TAG = "profile-config";
 const MOONSHOT_ANTHROPIC_BASE_URL = "https://api.moonshot.cn/anthropic";
 const MOONSHOT_CODING_PLAN_ANTHROPIC_BASE_URL = "https://api.kimi.com/coding";
 
-function getCandidateConfigPaths(): string[] {
+function getFallbackConfigPaths(rootDir: string): string[] {
+  return [
+    resolve(rootDir, "config/agent-profiles.json"),
+    resolve(rootDir, "config/agent-profiles.example.json"),
+  ];
+}
+
+function getCandidateConfigPaths(rootDir = agentProfilesRootDir ?? process.cwd()): string[] {
   const configured = process.env.AGENT_PROFILES_PATH?.trim();
   if (configured) {
-    return [resolve(configured)];
+    return [resolve(rootDir, configured)];
   }
 
-  return [
-    resolve("config/agent-profiles.json"),
-    resolve("config/agent-profiles.example.json"),
-  ];
+  return getFallbackConfigPaths(rootDir);
+}
+
+export function ensureAgentProfilesPath(rootDir: string): string {
+  agentProfilesRootDir = resolve(rootDir);
+  const configured = process.env.AGENT_PROFILES_PATH?.trim();
+  const configuredPath = configured
+    ? resolve(agentProfilesRootDir, configured)
+    : null;
+  const fallbackCandidates = getFallbackConfigPaths(agentProfilesRootDir);
+  const resolvedPath = [
+    ...(configuredPath ? [configuredPath] : []),
+    ...fallbackCandidates,
+  ].find((candidate) => existsSync(candidate)) ?? fallbackCandidates[0]!;
+
+  if (configuredPath && resolvedPath !== configuredPath) {
+    log.warn(TAG, "AGENT_PROFILES_PATH is invalid, falling back to root config", {
+      configuredPath,
+      fallbackPath: resolvedPath,
+    });
+  }
+
+  process.env.AGENT_PROFILES_PATH = resolvedPath;
+  return resolvedPath;
 }
 
 export function resolveAgentProfilesPath(): string {

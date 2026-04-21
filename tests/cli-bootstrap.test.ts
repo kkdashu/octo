@@ -2,16 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { initDatabase, registerGroup } from "../src/db";
 import {
   __test__,
   createCliMessageSender,
-  resolveInitialCliGroup,
   resolveInitialCliTarget,
 } from "../src/cli";
-import { GroupService } from "../src/group-service";
+import { initDatabase } from "../src/db";
 import { CliStateStore } from "../src/cli/state-store";
-import { WorkspaceService } from "../src/workspace-service";
+import { buildCliChatBindingId, WorkspaceService } from "../src/workspace-service";
 
 function createProfilesConfig(rootDir: string): string {
   const configPath = join(rootDir, "agent-profiles.json");
@@ -104,27 +102,24 @@ describe("CLI bootstrap helpers", () => {
     }
   });
 
-  test("resolveInitialCliGroup prefers explicit group, then state, then creates a new CLI group", () => {
+  test("resolveInitialCliTarget creates a new CLI workspace when there is no explicit target or saved state", () => {
     const rootDir = mkdtempSync(join(tmpdir(), "octo-cli-bootstrap-"));
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
     try {
+      mkdirSync(join(rootDir, "store"), { recursive: true });
       const configPath = createProfilesConfig(rootDir);
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
-      const groupService = new GroupService(db, { rootDir });
-      const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const first = groupService.createCliGroup({ name: "First" });
-      const second = groupService.createCliGroup({ name: "Second" });
+      const workspaceService = new WorkspaceService(db, { rootDir });
+      const stateStore = new CliStateStore(join(rootDir, "store", "cli-state.json"));
 
-      stateStore.setCurrentGroupFolder(first.folder);
-      expect(resolveInitialCliGroup(groupService, stateStore, second.folder).folder).toBe(second.folder);
-      expect(resolveInitialCliGroup(groupService, stateStore).folder).toBe(first.folder);
+      const resolved = resolveInitialCliTarget(workspaceService, stateStore);
 
-      stateStore.clear();
-      const created = resolveInitialCliGroup(groupService, stateStore);
-      expect(created.channel_type).toBe("cli");
-      expect(groupService.listCliGroups()).toHaveLength(3);
+      expect(resolved.workspace.folder).toMatch(/^cli_/);
+      expect(resolved.chat.workspace_id).toBe(resolved.workspace.id);
+      expect(workspaceService.listWorkspaces()).toHaveLength(1);
+      db.close(false);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;
@@ -140,32 +135,21 @@ describe("CLI bootstrap helpers", () => {
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
     try {
+      mkdirSync(join(rootDir, "store"), { recursive: true });
       const configPath = createProfilesConfig(rootDir);
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
-      const groupService = new GroupService(db, { rootDir });
       const workspaceService = new WorkspaceService(db, { rootDir });
-      const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
-      const group = groupService.createCliGroup({ name: "CLI Root" });
-      const workspace = workspaceService.getWorkspaceByFolder(group.folder);
-      expect(workspace).not.toBeNull();
-      if (!workspace) {
-        throw new Error("workspace missing");
-      }
-
-      const firstChat = workspaceService.listChats(workspace.id)[0];
-      expect(firstChat).not.toBeUndefined();
-      if (!firstChat) {
-        throw new Error("default chat missing");
-      }
-
+      const stateStore = new CliStateStore(join(rootDir, "store", "cli-state.json"));
+      const created = workspaceService.createCliWorkspace({ name: "CLI Root" });
+      const workspace = created.workspace;
+      const firstChat = created.chat;
       const secondChat = workspaceService.createChat(workspace.id, {
         title: "Route B",
         requiresTrigger: false,
       });
 
       const explicit = resolveInitialCliTarget(
-        groupService,
         workspaceService,
         stateStore,
         { chatId: secondChat.id },
@@ -175,7 +159,6 @@ describe("CLI bootstrap helpers", () => {
 
       stateStore.setCurrentChat(firstChat.id, workspace.folder);
       const fromState = resolveInitialCliTarget(
-        groupService,
         workspaceService,
         stateStore,
       );
@@ -183,13 +166,13 @@ describe("CLI bootstrap helpers", () => {
 
       stateStore.clear();
       const fromWorkspace = resolveInitialCliTarget(
-        groupService,
         workspaceService,
         stateStore,
         { workspace: workspace.folder },
       );
       expect(fromWorkspace.workspace.id).toBe(workspace.id);
       expect(fromWorkspace.chat.id).toBe(firstChat.id);
+      db.close(false);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;
@@ -205,19 +188,24 @@ describe("CLI bootstrap helpers", () => {
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
     try {
+      mkdirSync(join(rootDir, "store"), { recursive: true });
       const configPath = createProfilesConfig(rootDir);
       process.env.AGENT_PROFILES_PATH = configPath;
       const db = initDatabase(join(rootDir, "store", "messages.db"));
-      const groupService = new GroupService(db, { rootDir });
-      const cliGroup = groupService.createCliGroup({ name: "CLI" });
-      registerGroup(db, {
-        jid: "oc_feishu_group",
+      const workspaceService = new WorkspaceService(db, { rootDir });
+      const cliWorkspace = workspaceService.createCliWorkspace({ name: "CLI" });
+      const feishuWorkspace = workspaceService.createWorkspace({
         name: "Feishu",
         folder: "feishu_demo",
-        channelType: "feishu",
-        requiresTrigger: false,
-        isMain: false,
         profileKey: "claude",
+      });
+      workspaceService.createChat(feishuWorkspace.id, {
+        title: "Feishu",
+        requiresTrigger: false,
+        externalBinding: {
+          platform: "feishu",
+          externalChatId: "oc_feishu_group",
+        },
       });
 
       const sentMessages: Array<{ jid: string; text: string }> = [];
@@ -230,8 +218,9 @@ describe("CLI bootstrap helpers", () => {
       } as never);
 
       const sender = senderFactory({
-        group: cliGroup,
-        workingDirectory: join(rootDir, "groups", cliGroup.folder),
+        workspace: cliWorkspace.workspace,
+        chat: cliWorkspace.chat,
+        workingDirectory: join(rootDir, "workspaces", cliWorkspace.workspace.folder),
         profile: {
           profileKey: "claude",
           apiFormat: "anthropic",
@@ -243,12 +232,13 @@ describe("CLI bootstrap helpers", () => {
         },
       });
 
-      await expect(sender.send(cliGroup.jid, "hello")).rejects.toThrow(
-        "send_message to CLI groups is unsupported",
-      );
+      await expect(
+        sender.send(buildCliChatBindingId(cliWorkspace.workspace.folder), "hello"),
+      ).rejects.toThrow("send_message to CLI chats is unsupported");
 
       await sender.send("oc_feishu_group", "hello feishu");
       expect(sentMessages).toEqual([{ jid: "oc_feishu_group", text: "hello feishu" }]);
+      db.close(false);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

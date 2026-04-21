@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ChannelManager, __test__ as channelManagerTestHelpers } from "../src/channels/manager";
 import type { Channel } from "../src/channels/types";
-import { initDatabase, registerGroup } from "../src/db";
+import {
+  createChat,
+  createWorkspace,
+  initDatabase,
+  upsertChatBinding,
+} from "../src/db";
 
 function createTestDb(): { db: Database; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "octo-channel-manager-"));
@@ -13,16 +18,31 @@ function createTestDb(): { db: Database; dir: string } {
   return { db, dir };
 }
 
-function registerTestGroup(db: Database, jid = "oc_test") {
-  registerGroup(db, {
-    jid,
-    name: "Test Group",
-    folder: "test-group",
-    channelType: "feishu",
-    requiresTrigger: true,
-    isMain: false,
+function bindTestChat(
+  db: Database,
+  jid = "oc_test",
+  folder = "test-workspace",
+) {
+  const workspace = createWorkspace(db, {
+    name: "Test Workspace",
+    folder,
+    defaultBranch: "main",
     profileKey: "claude",
+    isMain: false,
   });
+  const chat = createChat(db, {
+    workspaceId: workspace.id,
+    title: "Test Chat",
+    activeBranch: "main",
+    requiresTrigger: false,
+    sessionRef: null,
+  });
+  upsertChatBinding(db, {
+    chatId: chat.id,
+    platform: "feishu",
+    externalChatId: jid,
+  });
+  return { workspace, chat };
 }
 
 describe("ChannelManager outgoing rich message handling", () => {
@@ -54,7 +74,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("sends plain text messages without image parsing overhead", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -82,7 +102,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("sends text and images in original order", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -116,7 +136,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("supports markdown image syntax", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -144,7 +164,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("sends text, images, and files in original order", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -180,14 +200,14 @@ describe("ChannelManager outgoing rich message handling", () => {
     expect(sentTexts).toEqual(["前文", "后文"]);
     expect(sentImages).toEqual(["/tmp/screen_final.png"]);
     expect(sentFiles).toEqual([
-      resolve("workspaces", "test-group", "artifacts/report.pdf"),
+      resolve("workspaces", "test-workspace", "artifacts/report.pdf"),
     ]);
   });
 
   test("falls back to raw text when channel does not support images", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const manager = new ChannelManager(db);
@@ -213,7 +233,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("falls back to raw text when channel does not support files", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const manager = new ChannelManager(db);
@@ -238,7 +258,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("continues after image send failure and emits fallback text", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -274,7 +294,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("falls back to file path when image send failure has no error message", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentImages: string[] = [];
@@ -307,7 +327,7 @@ describe("ChannelManager outgoing rich message handling", () => {
   test("continues after file send failure and emits fallback text", async () => {
     const { db, dir } = createTestDb();
     cleanupDirs.push(dir);
-    registerTestGroup(db);
+    bindTestChat(db);
 
     const sentTexts: string[] = [];
     const sentFiles: string[] = [];
@@ -333,7 +353,7 @@ describe("ChannelManager outgoing rich message handling", () => {
     );
 
     expect(sentFiles).toEqual([
-      resolve("workspaces", "test-group", "artifacts/report.pdf"),
+      resolve("workspaces", "test-workspace", "artifacts/report.pdf"),
     ]);
     expect(sentTexts).toEqual([
       "前文",

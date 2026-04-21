@@ -16,7 +16,7 @@
     "desktop:app": "cd desktop && bun install && bun run tauri:dev",
     "test": "bun test tests/*.test.ts",
     "test:providers": "bun test tests/providers.test.ts",
-    "test:pi": "bun test tests/providers.test.ts tests/group-queue.test.ts tests/runtime.test.ts"
+    "test:pi": "bun test tests/providers.test.ts tests/runtime.test.ts tests/pi-session-ref.test.ts"
   },
   "peerDependencies": {
     "typescript": "^5"

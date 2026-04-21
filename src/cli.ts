@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { InteractiveMode } from "@mariozechner/pi-coding-agent";
 import { FeishuChannel } from "./channels/feishu";
@@ -10,17 +9,14 @@ import {
   getChatByBinding,
   initDatabase,
 } from "./db";
-import { log } from "./logger";
 import type { PiGroupRuntimeContext } from "./runtime/pi-group-runtime-factory";
+import { ensureAgentProfilesPath } from "./runtime/profile-config";
 import type { MessageSender } from "./tools";
 import { CliStateStore } from "./cli/state-store";
 import { createOctoGroupExtension } from "./cli/octo-group-extension";
 import { OctoCliRuntimeHost } from "./cli/octo-cli-runtime-host";
-import { getWorkspaceDirectory } from "./group-workspace";
 import { GroupRuntimeManager } from "./kernel/group-runtime-manager";
 import { WorkspaceService } from "./workspace-service";
-
-const TAG = "cli";
 
 export interface CliArgs {
   workspace?: string;
@@ -229,27 +225,7 @@ function printHelp(): void {
 }
 
 function ensureCliAgentProfilesPath(rootDir: string): void {
-  const configured = process.env.AGENT_PROFILES_PATH?.trim();
-  const resolvedConfigured = configured ? resolve(rootDir, configured) : null;
-  if (resolvedConfigured && existsSync(resolvedConfigured)) {
-    process.env.AGENT_PROFILES_PATH = resolvedConfigured;
-    return;
-  }
-
-  const fallbackCandidates = [
-    resolve(rootDir, "config/agent-profiles.json"),
-    resolve(rootDir, "config/agent-profiles.example.json"),
-  ];
-  const fallbackPath = fallbackCandidates.find((candidate) => existsSync(candidate))
-    ?? fallbackCandidates[0]!;
-  if (configured) {
-    log.warn(TAG, "AGENT_PROFILES_PATH is invalid for CLI, falling back to root config", {
-      configuredPath: resolvedConfigured,
-      fallbackPath,
-    });
-  }
-
-  process.env.AGENT_PROFILES_PATH = fallbackPath;
+  ensureAgentProfilesPath(rootDir);
 }
 
 async function syncInteractiveModeRuntime(mode: InteractiveMode): Promise<void> {
@@ -337,6 +313,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
     db.close(false);
   }
 }
+
+export const __test__ = {
+  ensureCliAgentProfilesPath,
+};
 
 if (import.meta.main) {
   await runCli().catch((error) => {

@@ -13,7 +13,6 @@ import type {
   CustomMessageEntry,
   SessionEntry,
   SessionManager,
-  SessionMessageEntry,
 } from "@mariozechner/pi-coding-agent";
 import type {
   RuntimeMessageDelta,

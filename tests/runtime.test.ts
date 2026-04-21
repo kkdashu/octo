@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { initDatabase, registerGroup, updateGroupProfile } from "../src/db";
+import { join, resolve } from "node:path";
+import { initDatabase, updateWorkspace } from "../src/db";
 import { resolvePersistedPiSessionRef } from "../src/providers/pi-session-ref";
 import {
+  ensureAgentProfilesPath,
   listAgentProfiles,
   resolveAgentProfile,
 } from "../src/runtime/profile-config";
@@ -12,10 +13,10 @@ import {
   __test__ as minimaxMcpTestHelpers,
   resolveMiniMaxTokenPlanMcpConfig,
 } from "../src/runtime/minimax-token-plan-mcp";
-import { anthropicToOpenAI, openAIToAnthropic } from "../src/runtime/openai-transform";
 import { WorkspaceService } from "../src/workspace-service";
 
 const originalEnv = { ...process.env };
+const originalCwd = process.cwd();
 
 function createTempProfilesConfig(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "octo-runtime-test-"));
@@ -74,6 +75,32 @@ function createTempProfilesConfig(): { dir: string; path: string } {
   return { dir, path };
 }
 
+function createRootProfilesConfig(rootDir: string, fileName = "agent-profiles.json"): string {
+  const configDir = join(rootDir, "config");
+  mkdirSync(configDir, { recursive: true });
+  const path = join(configDir, fileName);
+  writeFileSync(
+    path,
+    JSON.stringify(
+      {
+        defaultProfile: "claude",
+        profiles: {
+          claude: {
+            apiFormat: "anthropic",
+            baseUrl: "https://api.anthropic.com",
+            apiKeyEnv: "ANTHROPIC_API_KEY",
+            model: "claude-sonnet-4-6",
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  return path;
+}
+
 describe("profile-config", () => {
   let tempDir = "";
 
@@ -88,6 +115,7 @@ describe("profile-config", () => {
   });
 
   afterEach(() => {
+    process.chdir(originalCwd);
     rmSync(tempDir, { recursive: true, force: true });
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) {
@@ -154,123 +182,63 @@ describe("profile-config", () => {
     expect(profile.apiKey).toBe("minimax-key");
     expect(profile.model).toBe("MiniMax-M2.7");
   });
-});
 
-describe("openai compatibility transforms", () => {
-  test("converts anthropic request into openai chat completions request", () => {
-    const request = anthropicToOpenAI({
-      model: "claude-sonnet-4-6",
-      system: "You are helpful",
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "hello" }],
-        },
-      ],
-      tools: [
-        {
-          name: "send_message",
-          description: "Send a message",
-          input_schema: {
-            type: "object",
-            properties: {
-              text: { type: "string" },
-            },
-            required: ["text"],
-          },
-        },
-      ],
-      max_tokens: 1024,
-      stream: true,
-    });
+  test("pins relative AGENT_PROFILES_PATH to rootDir before workspace cwd changes", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-runtime-root-config-"));
 
-    expect(request.model).toBe("claude-sonnet-4-6");
-    expect(request.messages).toEqual([
-      { role: "system", content: "You are helpful" },
-      { role: "user", content: "hello" },
-    ]);
-    expect(request.tools).toEqual([
-      {
-        type: "function",
-        function: {
-          name: "send_message",
-          description: "Send a message",
-          parameters: {
-            type: "object",
-            properties: {
-              text: { type: "string" },
-            },
-            required: ["text"],
-          },
-        },
-      },
-    ]);
+    try {
+      const configPath = createRootProfilesConfig(rootDir);
+      const workspaceDir = join(rootDir, "workspaces", "demo");
+      mkdirSync(workspaceDir, { recursive: true });
+      process.env.AGENT_PROFILES_PATH = "config/agent-profiles.json";
+
+      ensureAgentProfilesPath(rootDir);
+      process.chdir(workspaceDir);
+
+      const profile = resolveAgentProfile("claude");
+      expect(process.env.AGENT_PROFILES_PATH).toBe(resolve(configPath));
+      expect(profile.profileKey).toBe("claude");
+      expect(profile.model).toBe("claude-sonnet-4-6");
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
-  test("converts openai chat completions tool call response into anthropic message", () => {
-    const response = openAIToAnthropic({
-      id: "chatcmpl-1",
-      model: "gpt-5.4",
-      choices: [
-        {
-          finish_reason: "tool_calls",
-          message: {
-            role: "assistant",
-            content: "Working on it",
-            tool_calls: [
-              {
-                id: "call_1",
-                type: "function",
-                function: {
-                  name: "send_message",
-                  arguments: "{\"text\":\"hi\"}",
-                },
-              },
-            ],
-          },
-        },
-      ],
-      usage: {
-        prompt_tokens: 11,
-        completion_tokens: 7,
-      },
-    });
+  test("falls back to the root example config when the primary config is missing", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-runtime-root-config-"));
 
-    expect(response.stop_reason).toBe("tool_use");
-    expect(response.content).toEqual([
-      { type: "text", text: "Working on it" },
-      {
-        type: "tool_use",
-        id: "call_1",
-        name: "send_message",
-        input: { text: "hi" },
-      },
-    ]);
+    try {
+      const examplePath = createRootProfilesConfig(rootDir, "agent-profiles.example.json");
+      delete process.env.AGENT_PROFILES_PATH;
+
+      const resolvedPath = ensureAgentProfilesPath(rootDir);
+      const profile = resolveAgentProfile("claude");
+
+      expect(resolvedPath).toBe(resolve(examplePath));
+      expect(process.env.AGENT_PROFILES_PATH).toBe(resolve(examplePath));
+      expect(profile.profileKey).toBe("claude");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 });
 
 describe("db session retention on profile switch", () => {
-  test("updateGroupProfile keeps existing chat session refs", () => {
+  test("updateWorkspace keeps existing chat session refs", () => {
     const db = initDatabase(":memory:");
-    registerGroup(db, {
-      jid: "jid-1",
+    const workspaceService = new WorkspaceService(db);
+    const workspace = workspaceService.createWorkspace({
       name: "Test",
       folder: "group-1",
-      channelType: "feishu",
       profileKey: "claude",
     });
-
-    const workspaceService = new WorkspaceService(db);
-    const workspace = workspaceService.getWorkspaceByFolder("group-1");
-    if (!workspace) {
-      throw new Error("workspace missing");
-    }
-    const chat = workspaceService.listChats(workspace.id)[0];
-    if (!chat) {
-      throw new Error("chat missing");
-    }
+    const chat = workspaceService.createChat(workspace.id, {
+      title: "Test",
+      requiresTrigger: false,
+    });
     workspaceService.updateChat(chat.id, { sessionRef: "session-1" });
-    updateGroupProfile(db, "group-1", "codex");
+    updateWorkspace(db, workspace.id, { profileKey: "codex" });
 
     expect(workspaceService.getChatById(chat.id)?.session_ref).toBe("session-1");
   });
