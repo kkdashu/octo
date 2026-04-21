@@ -209,7 +209,6 @@ export function setupWorkspaceDirectory(
   options: SetupGroupWorkspaceOptions = {},
 ): void {
   const rootDir = options.rootDir ?? process.cwd();
-  migrateLegacyGroupWorkspace(folder, { rootDir });
   mkdirSync(resolveFromRoot(rootDir, "workspaces", folder), { recursive: true });
   ensureWorkspacePiDirectories(folder, { rootDir });
   ensureAgentsMd(folder, isMain, { rootDir });

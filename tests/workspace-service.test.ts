@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDatabase, registerGroup } from "../src/db";
+import { initDatabase } from "../src/db";
 import { WorkspaceService } from "../src/workspace-service";
 
 function createProfilesConfig(rootDir: string): string {
@@ -29,38 +29,45 @@ function createProfilesConfig(rootDir: string): string {
 }
 
 describe("workspace service", () => {
-  test("migrates a legacy group into a workspace with a default chat", () => {
+  test("does not migrate legacy groups into workspaces during database init", () => {
     const rootDir = mkdtempSync(join(tmpdir(), "octo-workspace-service-"));
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
     try {
       process.env.AGENT_PROFILES_PATH = createProfilesConfig(rootDir);
-      const db = initDatabase(join(rootDir, "store", "messages.db"));
-      registerGroup(db, {
-        jid: "oc_feishu_demo",
-        name: "Feishu Demo",
-        folder: "feishu_demo",
-        channelType: "feishu",
-        requiresTrigger: true,
-        isMain: true,
-        profileKey: "claude",
-      });
+      const dbPath = join(rootDir, "store", "messages.db");
+      const db = initDatabase(dbPath);
 
-      const service = new WorkspaceService(db, { rootDir });
-      const workspace = service.getWorkspaceByFolder("feishu_demo");
-      expect(workspace).not.toBeNull();
-      if (!workspace) {
-        throw new Error("workspace missing");
-      }
+      db.query(
+        `INSERT INTO registered_groups (
+           jid,
+           name,
+           folder,
+           channel_type,
+           trigger_pattern,
+           added_at,
+           requires_trigger,
+           is_main,
+           profile_key
+         ) VALUES (
+           'oc_feishu_demo',
+           'Feishu Demo',
+           'feishu_demo',
+           'feishu',
+           '',
+           '2026-04-21T00:00:00.000Z',
+           1,
+           1,
+           'claude'
+         )`,
+      ).run();
+      db.close();
 
-      const chats = service.listChats(workspace.id);
-      expect(chats).toHaveLength(1);
-      expect(chats[0]).toMatchObject({
-        title: "Feishu Demo",
-        active_branch: "main",
-        requires_trigger: 1,
-      });
-      expect(chats[0]?.session_ref).toBeNull();
+      const reopened = initDatabase(dbPath);
+      const service = new WorkspaceService(reopened, { rootDir });
+
+      expect(service.getWorkspaceByFolder("feishu_demo")).toBeNull();
+      expect(service.listWorkspaces()).toHaveLength(0);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;
@@ -97,6 +104,33 @@ describe("workspace service", () => {
       expect(existsSync(join(rootDir, "workspaces", "project_atlas"))).toBe(true);
       expect(existsSync(join(rootDir, "workspaces", "project_atlas", ".pi", "sessions"))).toBe(true);
       expect(existsSync(chat.session_ref!)).toBe(true);
+    } finally {
+      if (previousProfilesPath === undefined) {
+        delete process.env.AGENT_PROFILES_PATH;
+      } else {
+        process.env.AGENT_PROFILES_PATH = previousProfilesPath;
+      }
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  test("creates Feishu chats with direct replies enabled by default", () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "octo-workspace-service-"));
+    const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
+
+    try {
+      process.env.AGENT_PROFILES_PATH = createProfilesConfig(rootDir);
+      const db = initDatabase(join(rootDir, "store", "messages.db"));
+      const service = new WorkspaceService(db, { rootDir });
+
+      const workspace = service.ensureFeishuWorkspace("cli_test_app", {
+        profileKey: "claude",
+      });
+      const chat = service.ensureFeishuChat(workspace.id, "oc_feishu_demo");
+
+      expect(chat.workspace_id).toBe(workspace.id);
+      expect(chat.requires_trigger).toBe(0);
+      expect(chat.title).toBe("Auto (oc_feishu_demo)");
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

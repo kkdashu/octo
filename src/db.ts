@@ -214,7 +214,6 @@ export function initDatabase(dbPath: string): Database {
   migrateSessionsSessionRef(db);
   migrateWorkspacesProfileKey(db);
   migrateChatsTriggerConfig(db);
-  migrateLegacyGroupsToWorkspaces(db);
 
   return db;
 }

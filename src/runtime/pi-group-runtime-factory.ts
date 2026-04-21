@@ -27,8 +27,11 @@ import {
   deleteSessionRef,
   getGroupByFolder,
   getSessionRef,
+  getWorkspaceByFolder,
   listGroupMemories,
+  listWorkspaceMemories,
   saveSessionRef,
+  type GroupMemoryRow,
   type RegisteredGroup,
 } from "../db";
 import { getWorkspaceDirectory } from "../group-workspace";
@@ -141,7 +144,66 @@ export function getGroupForWorkingDirectory(
     return null;
   }
 
-  return getGroupByFolder(db, folder);
+  return resolveRuntimeGroupState(db, folder)?.group ?? null;
+}
+
+function buildWorkspaceBackedGroup(
+  folder: string,
+  workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>,
+): RegisteredGroup {
+  return {
+    jid: `workspace:${workspace.id}`,
+    name: workspace.name,
+    folder,
+    channel_type: "workspace",
+    trigger_pattern: "",
+    added_at: workspace.created_at,
+    requires_trigger: 0,
+    is_main: workspace.is_main,
+    profile_key: workspace.profile_key,
+  };
+}
+
+function mapWorkspaceMemoriesToGroupMemories(
+  folder: string,
+): (memory: ReturnType<typeof listWorkspaceMemories>[number]) => GroupMemoryRow {
+  return (memory) => ({
+    group_folder: folder,
+    key: memory.key,
+    key_type: memory.key_type,
+    value: memory.value,
+    source: memory.source,
+    created_at: memory.created_at,
+    updated_at: memory.updated_at,
+  });
+}
+
+function resolveRuntimeGroupState(
+  db: Database,
+  folder: string,
+): {
+  group: RegisteredGroup;
+  memories: GroupMemoryRow[];
+} | null {
+  const group = getGroupByFolder(db, folder);
+  if (group) {
+    return {
+      group,
+      memories: listGroupMemories(db, folder),
+    };
+  }
+
+  const workspace = getWorkspaceByFolder(db, folder);
+  if (!workspace) {
+    return null;
+  }
+
+  return {
+    group: buildWorkspaceBackedGroup(folder, workspace),
+    memories: listWorkspaceMemories(db, workspace.id).map(
+      mapWorkspaceMemoriesToGroupMemories(folder),
+    ),
+  };
 }
 
 export function resolveGroupSessionRef(
@@ -215,11 +277,13 @@ export function createPiGroupRuntimeFactory(
     sessionManager,
     sessionStartEvent,
   }): Promise<CreateAgentSessionRuntimeResult> => {
-    const group = getGroupForWorkingDirectory(options.db, cwd, rootDir);
-    if (!group) {
-      throw new Error(`No registered group matches cwd: ${cwd}`);
+    const folder = getGroupFolderFromWorkingDirectory(cwd, rootDir);
+    const runtimeState = folder ? resolveRuntimeGroupState(options.db, folder) : null;
+    if (!runtimeState) {
+      throw new Error(`No runtime workspace matches cwd: ${cwd}`);
     }
 
+    const { group, memories } = runtimeState;
     const profile = resolveAgentProfile(group.profile_key);
     const context: PiGroupRuntimeContext = {
       group,
@@ -240,7 +304,7 @@ export function createPiGroupRuntimeFactory(
         modelRegistry: buildProfileModelRegistry(profile),
         resourceLoaderOptions: {
           appendSystemPrompt: buildGroupMemoryAppendSystemPrompt(
-            listGroupMemories(options.db, group.folder),
+            memories,
           ),
           extensionFactories: [
             ...mcpBundle.extensionFactories,
@@ -309,11 +373,12 @@ export async function createPiGroupRuntime(
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const group = getGroupByFolder(options.db, options.groupFolder);
-  if (!group) {
+  const runtimeState = resolveRuntimeGroupState(options.db, options.groupFolder);
+  if (!runtimeState) {
     throw new Error(`Group not found: ${options.groupFolder}`);
   }
 
+  const { group } = runtimeState;
   const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
   const sessionRef = resolveGroupSessionRef(
     options.db,
@@ -359,11 +424,12 @@ export async function createPiGroupSessionHost(
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const group = getGroupByFolder(options.db, options.groupFolder);
-  if (!group) {
+  const runtimeState = resolveRuntimeGroupState(options.db, options.groupFolder);
+  if (!runtimeState) {
     throw new Error(`Group not found: ${options.groupFolder}`);
   }
 
+  const { group } = runtimeState;
   const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
   const sessionRef = resolveGroupSessionRef(
     options.db,
