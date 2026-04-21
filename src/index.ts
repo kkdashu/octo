@@ -11,6 +11,7 @@ import {
   MiniMaxTokenPlanMcpClient,
   resolveMiniMaxTokenPlanMcpConfig,
 } from "./runtime/minimax-token-plan-mcp";
+import { createRuntimeInputPreprocessor } from "./runtime/runtime-input-preprocessor";
 import {
   ensureAgentProfilesPath,
   loadAgentProfilesConfig,
@@ -32,7 +33,7 @@ for (const workspace of workspaceService.listWorkspaces()) {
   workspaceService.ensureWorkspaceDirectory(workspace);
 }
 
-const channelManager = new ChannelManager(db);
+const channelManager = new ChannelManager(db, { rootDir });
 
 log.info(TAG, "Creating Feishu channel", {
   appId: process.env.FEISHU_APP_ID,
@@ -131,11 +132,18 @@ const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
   analyzeImage: minimaxTokenPlanClient,
   db,
 });
+const runtimeInputPreprocessor = createRuntimeInputPreprocessor({
+  db,
+  rootDir,
+  workspaceService,
+  imageMessagePreprocessor,
+});
 const groupQueue = new FeishuGroupAdapter({
   db,
   workspaceService,
   channelManager,
   imageMessagePreprocessor,
+  preparePrompt: runtimeInputPreprocessor.prepare,
 });
 
 await channelManager.startAll();

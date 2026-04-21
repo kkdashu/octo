@@ -8,10 +8,17 @@ import { startDesktopServer } from "./server";
 import { initDatabase } from "../db";
 import { GroupRuntimeManager } from "../kernel/group-runtime-manager";
 import { log } from "../logger";
+import { DatabaseImageMessagePreprocessor } from "../runtime/image-message-preprocessor";
+import {
+  MiniMaxTokenPlanMcpClient,
+  resolveMiniMaxTokenPlanMcpConfig,
+} from "../runtime/minimax-token-plan-mcp";
 import { ensureAgentProfilesPath } from "../runtime/profile-config";
+import { createRuntimeInputPreprocessor } from "../runtime/runtime-input-preprocessor";
 import { WorkspaceService } from "../workspace-service";
 
 const TAG = "desktop-main";
+const IDLE_RUNTIME_PRUNE_INTERVAL_MS = 60_000;
 
 export interface DesktopSidecarOptions {
   rootDir?: string;
@@ -80,14 +87,30 @@ export async function startDesktopSidecar(
     workspaceService.ensureWorkspaceDirectory(workspace);
   }
 
-  const channelManager = new ChannelManager(db);
+  const channelManager = new ChannelManager(db, { rootDir });
   registerOutboundFeishuChannel(channelManager);
+  const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
+  if (!minimaxTokenPlanConfig.apiKey) {
+    log.warn(TAG, "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders");
+  }
+  const minimaxTokenPlanClient = new MiniMaxTokenPlanMcpClient(minimaxTokenPlanConfig);
+  const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
+    analyzeImage: minimaxTokenPlanClient,
+    db,
+  });
+  const runtimeInputPreprocessor = createRuntimeInputPreprocessor({
+    db,
+    rootDir,
+    workspaceService,
+    imageMessagePreprocessor,
+  });
 
   const manager = new GroupRuntimeManager({
     db,
     workspaceService,
     rootDir,
     createMessageSender: createCliMessageSender(db, channelManager),
+    preparePrompt: runtimeInputPreprocessor.prepare,
   });
 
   const api = createDesktopApiRouter(manager, {
@@ -114,6 +137,11 @@ export async function startDesktopSidecar(
     hostname: options.hostname,
     port: options.port,
   });
+  const idleRuntimePruneTimer = setInterval(() => {
+    void manager.pruneIdleRuntimes().catch((error) => {
+      log.error(TAG, "Idle runtime prune failed", error);
+    });
+  }, IDLE_RUNTIME_PRUNE_INTERVAL_MS);
 
   let stopped = false;
   return {
@@ -131,7 +159,9 @@ export async function startDesktopSidecar(
       }
 
       stopped = true;
+      clearInterval(idleRuntimePruneTimer);
       server.stop(true);
+      await minimaxTokenPlanClient.close();
       await manager.dispose();
       await channelManager.stopAll();
       db.close(false);

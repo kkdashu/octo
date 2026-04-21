@@ -7,15 +7,12 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { ConversationMessageInput } from "../providers/types";
 import {
-  appendRunEvent,
   createTurnRequest,
-  createRun,
   getChatById,
   getRunById,
   getWorkspaceRuntimeState,
   updateTurnRequest,
   updateChat,
-  updateRun,
   upsertWorkspaceRuntimeState,
   type ChatRow,
   type RunRow,
@@ -28,7 +25,6 @@ import {
   createPiGroupRuntime,
 } from "../runtime/pi-group-runtime-factory";
 import {
-  checkoutWorkspaceBranch,
   createWorkspaceBranch,
   getCurrentWorkspaceBranch,
   isWorkspaceDirty,
@@ -37,6 +33,13 @@ import {
 } from "../workspace-git";
 import { calculateWorkspaceUnloadAfter } from "../workspace-runtime-state";
 import { WorkspaceService } from "../workspace-service";
+import {
+  appendPersistedRuntimeEvent,
+  ensureWorkspaceOnChatBranch as ensureWorkspaceBranchMatch,
+  finishPersistedRun,
+  persistChatSessionRef,
+  startPersistedRun,
+} from "../runtime/run-lifecycle";
 import {
   buildRenderableMessages,
   toRenderableAssistantDelta,
@@ -79,6 +82,10 @@ export interface GroupRuntimeManagerOptions {
   getExtensionFactories?: (
     context: PiGroupRuntimeContext,
   ) => ExtensionFactory[] | Promise<ExtensionFactory[]>;
+  preparePrompt?: (
+    chatId: string,
+    text: string,
+  ) => Promise<string>;
   createChatRuntime?: (
     chatId: string,
   ) => Promise<CreateChatRuntimeResult>;
@@ -110,6 +117,10 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
   private readonly listeners = new Map<string, Set<RuntimeListener>>();
   private readonly runtimes = new Map<string, ManagedChatRuntime>();
   private readonly pendingLoads = new Map<string, Promise<ManagedChatRuntime>>();
+  private readonly preparePrompt: (
+    chatId: string,
+    text: string,
+  ) => Promise<string>;
   private readonly createChatRuntime: (
     chatId: string,
   ) => Promise<CreateChatRuntimeResult>;
@@ -118,6 +129,8 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     this.rootDir = options.rootDir ?? process.cwd();
     this.workspaceService = options.workspaceService
       ?? new WorkspaceService(options.db, { rootDir: this.rootDir });
+    this.preparePrompt = options.preparePrompt
+      ?? (async (_chatId, text) => text);
     this.createChatRuntime = options.createChatRuntime
       ?? (async (chatId) => {
         const chat = this.workspaceService.getChatById(chatId);
@@ -466,6 +479,43 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     }
   }
 
+  async pruneIdleRuntimes(now = new Date()): Promise<void> {
+    const timestamp = now.getTime();
+    const entries = [...this.runtimes.entries()];
+
+    for (const [chatId, managed] of entries) {
+      if (managed.currentRunId) {
+        continue;
+      }
+
+      if (managed.runtime.session.isStreaming) {
+        continue;
+      }
+
+      if (managed.pendingFollowUp.length > 0 || managed.pendingSteering.length > 0) {
+        continue;
+      }
+
+      if ((this.listeners.get(chatId)?.size ?? 0) > 0) {
+        continue;
+      }
+
+      const state = getWorkspaceRuntimeState(this.options.db, managed.workspace.id);
+      if (!state?.unload_after) {
+        continue;
+      }
+
+      const unloadAt = new Date(state.unload_after).getTime();
+      if (!Number.isFinite(unloadAt) || unloadAt > timestamp) {
+        continue;
+      }
+
+      managed.unsubscribeSession();
+      await managed.runtime.dispose();
+      this.runtimes.delete(chatId);
+    }
+  }
+
   private toSummary(
     workspace: WorkspaceRow,
     chat: ChatRow,
@@ -763,6 +813,8 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     managed: ManagedChatRuntime,
     input: ConversationMessageInput,
   ): Promise<void> {
+    const normalizedText = await this.preparePrompt(managed.chat.id, input.text);
+
     if (input.mode === "prompt") {
       if (managed.runtime.session.isStreaming) {
         throw new Error(
@@ -770,26 +822,26 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
         );
       }
 
-      await managed.runtime.session.prompt(input.text);
+      await managed.runtime.session.prompt(normalizedText);
       return;
     }
 
     if (input.mode === "follow_up") {
       if (managed.runtime.session.isStreaming) {
-        await managed.runtime.session.followUp(input.text);
+        await managed.runtime.session.followUp(normalizedText);
         return;
       }
 
-      await managed.runtime.session.prompt(input.text);
+      await managed.runtime.session.prompt(normalizedText);
       return;
     }
 
     if (managed.runtime.session.isStreaming) {
-      await managed.runtime.session.steer(input.text);
+      await managed.runtime.session.steer(normalizedText);
       return;
     }
 
-    await managed.runtime.session.prompt(input.text);
+    await managed.runtime.session.prompt(normalizedText);
   }
 
   private async afterRuntimeOperation(
@@ -823,11 +875,11 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     sessionRef: string | null,
   ): void {
     const resolved = managed.runtime.session.sessionFile ?? sessionRef;
-    updateChat(this.options.db, managed.chat.id, {
-      sessionRef: resolved,
-      lastActivityAt: new Date().toISOString(),
-    });
-    const updated = getChatById(this.options.db, managed.chat.id);
+    const updated = persistChatSessionRef(
+      this.options.db,
+      managed.chat.id,
+      resolved,
+    );
     if (updated) {
       managed.chat = updated;
     }
@@ -867,13 +919,9 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
   }
 
   private ensureWorkspaceOnChatBranch(managed: ManagedChatRuntime): void {
-    const workspaceDir = getWorkspaceDirectory(managed.workspace.folder, {
+    ensureWorkspaceBranchMatch(managed.workspace, managed.chat, {
       rootDir: this.rootDir,
     });
-    const currentBranch = getCurrentWorkspaceBranch(workspaceDir);
-    if (currentBranch !== managed.chat.active_branch) {
-      checkoutWorkspaceBranch(workspaceDir, managed.chat.active_branch);
-    }
   }
 
   private startRun(
@@ -883,35 +931,13 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
   ): RunRow {
     this.ensureWorkspaceNotRunning(managed.workspace.id, managed.chat.id);
     this.ensureWorkspaceOnChatBranch(managed);
-    const now = new Date().toISOString();
-    const run = createRun(this.options.db, {
+    const run = startPersistedRun(this.options.db, {
+      workspace: managed.workspace,
+      chat: managed.chat,
       turnRequestId: turnRequestId ?? null,
-      workspaceId: managed.workspace.id,
-      chatId: managed.chat.id,
-      status: "running",
-      branch: managed.chat.active_branch,
       triggerSource,
-      startedAt: now,
     });
     managed.currentRunId = run.id;
-    upsertWorkspaceRuntimeState(this.options.db, {
-      workspaceId: managed.workspace.id,
-      checkedOutBranch: managed.chat.active_branch,
-      activeRunId: run.id,
-      status: "running",
-      lastActivityAt: now,
-      unloadAfter: null,
-    });
-    appendRunEvent(this.options.db, {
-      runId: run.id,
-      chatId: managed.chat.id,
-      eventType: "run_started",
-      payload: JSON.stringify({
-        triggerSource,
-        branch: managed.chat.active_branch,
-      }),
-      createdAt: now,
-    });
     return run;
   }
 
@@ -924,38 +950,12 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
       return;
     }
 
-    const now = new Date().toISOString();
-    const currentRunId = managed.currentRunId;
-    const run = currentRunId ? getRunById(this.options.db, currentRunId) : null;
-    if (run?.turn_request_id) {
-      updateTurnRequest(this.options.db, run.turn_request_id, {
-        status,
-        completedAt: now,
-        error: error ?? null,
-      });
-    }
-    updateRun(this.options.db, managed.currentRunId, {
-      status,
-      endedAt: now,
-      error: error ?? null,
-    });
-    appendRunEvent(this.options.db, {
+    finishPersistedRun(this.options.db, {
+      workspace: managed.workspace,
+      chat: managed.chat,
       runId: managed.currentRunId,
-      chatId: managed.chat.id,
-      eventType: `run_${status}`,
-      payload: JSON.stringify({
-        error: error ?? null,
-      }),
-      createdAt: now,
-    });
-    upsertWorkspaceRuntimeState(this.options.db, {
-      workspaceId: managed.workspace.id,
-      checkedOutBranch: managed.chat.active_branch,
-      activeRunId: null,
-      status: status === "failed" ? "error" : "idle",
-      lastActivityAt: now,
-      unloadAfter: calculateWorkspaceUnloadAfter(new Date(now)),
-      lastError: status === "failed" ? error ?? null : null,
+      status,
+      error: error ?? null,
     });
     managed.currentRunId = null;
   }
@@ -968,43 +968,25 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     createdAt = new Date(),
   ): void {
     const timestamp = createdAt.toISOString();
-    const run = createRun(this.options.db, {
-      workspaceId: managed.workspace.id,
-      chatId: managed.chat.id,
-      status: "running",
-      branch: managed.chat.active_branch,
+    const run = startPersistedRun(this.options.db, {
+      workspace: managed.workspace,
+      chat: managed.chat,
       triggerSource,
       startedAt: timestamp,
     });
-    appendRunEvent(this.options.db, {
-      runId: run.id,
-      chatId: managed.chat.id,
-      eventType: "run_started",
-      payload: JSON.stringify({
-        triggerSource,
-        branch: managed.chat.active_branch,
-      }),
-      createdAt: timestamp,
-    });
-    appendRunEvent(this.options.db, {
+    appendPersistedRuntimeEvent(this.options.db, {
       runId: run.id,
       chatId: managed.chat.id,
       eventType,
-      payload: JSON.stringify(payload),
+      payload,
       createdAt: timestamp,
     });
-    updateRun(this.options.db, run.id, {
-      status: "completed",
-      endedAt: timestamp,
-    });
-    appendRunEvent(this.options.db, {
+    finishPersistedRun(this.options.db, {
+      workspace: managed.workspace,
+      chat: managed.chat,
       runId: run.id,
-      chatId: managed.chat.id,
-      eventType: "run_completed",
-      payload: JSON.stringify({
-        triggerSource,
-      }),
-      createdAt: timestamp,
+      status: "completed",
+      completedAt: timestamp,
     });
   }
 
@@ -1013,15 +995,11 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
     eventType: string,
     payload: unknown,
   ): void {
-    if (!managed.currentRunId) {
-      return;
-    }
-
-    appendRunEvent(this.options.db, {
+    appendPersistedRuntimeEvent(this.options.db, {
       runId: managed.currentRunId,
       chatId: managed.chat.id,
       eventType,
-      payload: JSON.stringify(payload),
+      payload,
     });
   }
 

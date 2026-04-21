@@ -7,6 +7,7 @@ import {
   resolveDesktopSidecarOptionsFromEnv,
   startDesktopSidecar,
 } from "../src/desktop/main";
+import { log } from "../src/logger";
 import { DESKTOP_HOSTNAME } from "../src/desktop/server";
 import { WorkspaceService } from "../src/workspace-service";
 
@@ -60,7 +61,9 @@ const previousEnv = {
   OCTO_DB_PATH: process.env.OCTO_DB_PATH,
   DESKTOP_HOSTNAME: process.env.DESKTOP_HOSTNAME,
   DESKTOP_PORT: process.env.DESKTOP_PORT,
+  MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
 };
+const originalLogWarn = log.warn;
 
 afterEach(() => {
   process.env.AGENT_PROFILES_PATH = previousEnv.AGENT_PROFILES_PATH;
@@ -68,6 +71,8 @@ afterEach(() => {
   process.env.OCTO_DB_PATH = previousEnv.OCTO_DB_PATH;
   process.env.DESKTOP_HOSTNAME = previousEnv.DESKTOP_HOSTNAME;
   process.env.DESKTOP_PORT = previousEnv.DESKTOP_PORT;
+  process.env.MINIMAX_API_KEY = previousEnv.MINIMAX_API_KEY;
+  log.warn = originalLogWarn;
 
   while (cleanupDirs.length > 0) {
     const dir = cleanupDirs.pop();
@@ -252,6 +257,95 @@ describe("desktop sidecar bootstrap", () => {
       await handle.stop();
       expect(stopCalled).toBe(true);
     } finally {
+      bunObject.serve = originalServe;
+    }
+  });
+
+  test("warns without MINIMAX_API_KEY and schedules idle runtime pruning", async () => {
+    const { dir, configPath } = createWorkspace();
+    cleanupDirs.push(dir);
+    process.env.AGENT_PROFILES_PATH = configPath;
+    delete process.env.MINIMAX_API_KEY;
+
+    const warnCalls: Array<{ tag: string; message: string }> = [];
+    log.warn = ((tag: string, message: string) => {
+      warnCalls.push({ tag, message });
+    }) as typeof log.warn;
+
+    const originalServe = Bun.serve;
+    let stopCalled = false;
+    const bunObject = Bun as unknown as {
+      serve: typeof Bun.serve;
+    };
+    bunObject.serve = ((options: Parameters<typeof Bun.serve>[0]) => ({
+      url: new URL(`http://${options.hostname}:${options.port}`),
+      stop(closeActiveConnections?: boolean) {
+        stopCalled = closeActiveConnections ?? false;
+      },
+    }) as ReturnType<typeof Bun.serve>) as typeof Bun.serve;
+
+    const originalSetInterval = globalThis.setInterval;
+    const originalClearInterval = globalThis.clearInterval;
+    let scheduledCallback: (() => void) | null = null;
+    let scheduledDelay: number | undefined;
+    const intervalHandle = {
+      ref() {
+        return intervalHandle;
+      },
+      unref() {
+        return intervalHandle;
+      },
+      hasRef() {
+        return true;
+      },
+      refresh() {
+        return intervalHandle;
+      },
+      [Symbol.dispose]() {},
+    } as ReturnType<typeof setInterval>;
+    let clearedHandle: ReturnType<typeof setInterval> | null = null;
+
+    globalThis.setInterval = ((handler: TimerHandler, timeout?: number) => {
+      scheduledCallback = typeof handler === "function"
+        ? (() => {
+            handler();
+          })
+        : null;
+      scheduledDelay = timeout;
+      return intervalHandle;
+    }) as typeof setInterval;
+    globalThis.clearInterval = ((handle?: ReturnType<typeof setInterval>) => {
+      clearedHandle = handle ?? null;
+    }) as typeof clearInterval;
+
+    try {
+      const handle = await startDesktopSidecar({
+        rootDir: dir,
+        port: 4319,
+      });
+
+      expect(warnCalls).toContainEqual({
+        tag: "desktop-main",
+        message: "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders",
+      });
+      expect(scheduledDelay).toBe(60_000);
+      expect(scheduledCallback).not.toBeNull();
+
+      let pruneCalls = 0;
+      handle.manager.pruneIdleRuntimes = async () => {
+        pruneCalls += 1;
+      };
+      scheduledCallback?.();
+      await Promise.resolve();
+      expect(pruneCalls).toBe(1);
+
+      await handle.stop();
+
+      expect(clearedHandle).toBe(intervalHandle);
+      expect(stopCalled).toBe(true);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      globalThis.clearInterval = originalClearInterval;
       bunObject.serve = originalServe;
     }
   });

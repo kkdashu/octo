@@ -17,6 +17,10 @@ const TAG = "channel-mgr";
 
 export type OutgoingMessagePart = MessagePart;
 
+export interface ChannelManagerOptions {
+  rootDir?: string;
+}
+
 export function parseOutgoingMessageParts(text: string): OutgoingMessagePart[] {
   return parseMessageParts(normalizeLegacyImageSyntax(text));
 }
@@ -29,9 +33,11 @@ function isEscapedPath(baseDir: string, resolvedPath: string): boolean {
 export class ChannelManager {
   private channels: Map<string, Channel> = new Map();
   private db: Database;
+  private readonly rootDir: string;
 
-  constructor(db: Database) {
+  constructor(db: Database, options: ChannelManagerOptions = {}) {
     this.db = db;
+    this.rootDir = options.rootDir ?? process.cwd();
   }
 
   register(channel: Channel) {
@@ -90,7 +96,9 @@ export class ChannelManager {
       return resolve(normalizedPath);
     }
 
-    const workspaceDir = getWorkspaceDirectory(workspace.folder);
+    const workspaceDir = getWorkspaceDirectory(workspace.folder, {
+      rootDir: this.rootDir,
+    });
     const resolvedPath = resolve(workspaceDir, normalizedPath);
     if (isEscapedPath(workspaceDir, resolvedPath)) {
       throw new Error(

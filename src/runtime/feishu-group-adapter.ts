@@ -1,24 +1,15 @@
 import type { Database } from "bun:sqlite";
 import {
-  appendRunEvent,
   createTurnRequest,
-  createRun,
   getTurnRequestById,
   listChatBindingsForChat,
   type TurnRequestRow,
   updateTurnRequest,
-  updateChat,
-  updateRun,
-  upsertWorkspaceRuntimeState,
   type ChatRow,
   type WorkspaceRow,
 } from "../db";
-import { getWorkspaceDirectory } from "../group-workspace";
 import { log } from "../logger";
-import {
-  collectAssistantText,
-  normalizePromptForAgent,
-} from "../providers/prompt-normalizer";
+import { collectAssistantText } from "../providers/prompt-normalizer";
 import type { ConversationMessageInput } from "../providers/types";
 import type { ImageMessagePreprocessor } from "./image-message-preprocessor";
 import type {
@@ -37,10 +28,14 @@ import {
 import type { ChannelManager } from "../channels/manager";
 import { WorkspaceService } from "../workspace-service";
 import {
-  checkoutWorkspaceBranch,
-  getCurrentWorkspaceBranch,
-} from "../workspace-git";
-import { calculateWorkspaceUnloadAfter } from "../workspace-runtime-state";
+  appendPersistedRuntimeEvent,
+  ensureWorkspaceOnChatBranch as ensureWorkspaceBranchMatch,
+  finishPersistedRun,
+  persistChatSessionRef,
+  startPersistedRun,
+} from "./run-lifecycle";
+import { AsyncSemaphore } from "./async-semaphore";
+import { createRuntimeInputPreprocessor } from "./runtime-input-preprocessor";
 
 const TAG = "feishu-group-adapter";
 
@@ -144,7 +139,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
   private readonly activeSessions = new Map<string, ActiveChatSession>();
   private readonly sessionGenerations = new Map<string, number>();
   private readonly outboundLocks = new Map<string, Promise<void>>();
-  private activeTasks = 0;
+  private readonly semaphore: AsyncSemaphore;
   private readonly createChatSessionHost: (
     chatId: string,
   ) => Promise<CreateChatSessionHostResult>;
@@ -156,6 +151,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       ?? new WorkspaceService(options.db, { rootDir: options.rootDir ?? process.cwd() });
     this.concurrencyLimit = options.concurrencyLimit ?? 3;
     this.rootDir = options.rootDir ?? process.cwd();
+    this.semaphore = new AsyncSemaphore(this.concurrencyLimit);
     this.createChatSessionHost = options.createChatSessionHost
       ?? (async (chatId) => {
         const chat = this.resolveChat(chatId);
@@ -199,17 +195,12 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         }
       });
     this.preparePrompt = options.preparePrompt
-      ?? ((chatId, text) => {
-        const chat = this.resolveChat(chatId);
-        const workspace = this.getWorkspaceForChat(chat);
-        return normalizePromptForAgent(
-          text,
-          this.rootDir,
-          getWorkspaceDirectory(workspace.folder, { rootDir: this.rootDir }),
-          options.imageMessagePreprocessor,
-          TAG,
-        );
-      });
+      ?? createRuntimeInputPreprocessor({
+        db: options.db,
+        rootDir: this.rootDir,
+        workspaceService: this.workspaceService,
+        imageMessagePreprocessor: options.imageMessagePreprocessor,
+      }).prepare;
 
     log.info(TAG, "FeishuGroupAdapter initialized", {
       concurrencyLimit: this.concurrencyLimit,
@@ -373,9 +364,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     turnRequest: TurnRequestRow,
   ): Promise<EnqueueRuntimeResult> {
     const initialChat = this.resolveChat(turnRequest.chat_id);
-    const initialWorkspace = this.getWorkspaceForChat(initialChat);
-    await this.waitForConcurrencySlot(initialWorkspace.id);
-    this.activeTasks += 1;
+    const releaseConcurrency = await this.semaphore.acquire();
 
     const sessionGeneration = this.getSessionGeneration(initialChat.id);
     let activeSession: ActiveChatSession | null = null;
@@ -402,33 +391,15 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         };
       }
 
-      this.ensureWorkspaceOnChatBranch(created.workspace, created.chat);
-      const run = createRun(this.options.db, {
+      ensureWorkspaceBranchMatch(created.workspace, created.chat, {
+        rootDir: this.rootDir,
+      });
+      const run = startPersistedRun(this.options.db, {
+        workspace: created.workspace,
+        chat: created.chat,
         turnRequestId: turnRequest.id,
-        workspaceId: created.workspace.id,
-        chatId: created.chat.id,
-        status: "running",
-        branch: created.chat.active_branch,
         triggerSource: turnRequest.source_type,
         startedAt,
-      });
-      upsertWorkspaceRuntimeState(this.options.db, {
-        workspaceId: created.workspace.id,
-        checkedOutBranch: created.chat.active_branch,
-        activeRunId: run.id,
-        status: "running",
-        lastActivityAt: startedAt,
-        unloadAfter: null,
-      });
-      appendRunEvent(this.options.db, {
-        runId: run.id,
-        chatId: created.chat.id,
-        eventType: "run_started",
-        payload: JSON.stringify({
-          triggerSource: turnRequest.source_type,
-          branch: created.chat.active_branch,
-        }),
-        createdAt: startedAt,
       });
 
       activeSession = {
@@ -529,7 +500,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
           });
         });
       }
-      this.activeTasks = Math.max(0, this.activeTasks - 1);
+      releaseConcurrency();
     }
   }
 
@@ -744,33 +715,8 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     return flushPromise;
   }
 
-  private async waitForConcurrencySlot(workspaceId: string): Promise<void> {
-    while (
-      this.activeTasks >= this.concurrencyLimit
-      || (this.activeSessions.has(workspaceId) && !this.activeSessions.get(workspaceId)?.closed)
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-
   private persistSessionRef(chatId: string, sessionRef: string | null): void {
-    updateChat(this.options.db, chatId, {
-      sessionRef,
-      lastActivityAt: new Date().toISOString(),
-    });
-  }
-
-  private ensureWorkspaceOnChatBranch(
-    workspace: WorkspaceRow,
-    chat: ChatRow,
-  ): void {
-    const workspaceDir = getWorkspaceDirectory(workspace.folder, {
-      rootDir: this.rootDir,
-    });
-    const currentBranch = getCurrentWorkspaceBranch(workspaceDir);
-    if (currentBranch !== chat.active_branch) {
-      checkoutWorkspaceBranch(workspaceDir, chat.active_branch);
-    }
+    persistChatSessionRef(this.options.db, chatId, sessionRef);
   }
 
   private finishRun(
@@ -778,34 +724,12 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     status: "completed" | "failed" | "cancelled",
     error?: string,
   ): void {
-    const now = new Date().toISOString();
-    updateTurnRequest(this.options.db, activeSession.turnRequestId, {
-      status,
-      completedAt: now,
-      error: error ?? null,
-    });
-    updateRun(this.options.db, activeSession.runId, {
-      status,
-      endedAt: now,
-      error: error ?? null,
-    });
-    appendRunEvent(this.options.db, {
+    finishPersistedRun(this.options.db, {
+      workspace: activeSession.workspace,
+      chat: activeSession.chat,
       runId: activeSession.runId,
-      chatId: activeSession.chat.id,
-      eventType: `run_${status}`,
-      payload: JSON.stringify({
-        error: error ?? null,
-      }),
-      createdAt: now,
-    });
-    upsertWorkspaceRuntimeState(this.options.db, {
-      workspaceId: activeSession.workspace.id,
-      checkedOutBranch: activeSession.chat.active_branch,
-      activeRunId: null,
-      status: status === "failed" ? "error" : "idle",
-      lastActivityAt: now,
-      unloadAfter: calculateWorkspaceUnloadAfter(new Date(now)),
-      lastError: status === "failed" ? error ?? null : null,
+      status,
+      error: error ?? null,
     });
   }
 
@@ -814,11 +738,11 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     eventType: string,
     payload: unknown,
   ): void {
-    appendRunEvent(this.options.db, {
+    appendPersistedRuntimeEvent(this.options.db, {
       runId: activeSession.runId,
       chatId: activeSession.chat.id,
       eventType,
-      payload: JSON.stringify(payload),
+      payload,
     });
   }
 }

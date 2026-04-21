@@ -16,7 +16,14 @@ import { CliStateStore } from "./cli/state-store";
 import { createOctoGroupExtension } from "./cli/octo-group-extension";
 import { OctoCliRuntimeHost } from "./cli/octo-cli-runtime-host";
 import { GroupRuntimeManager } from "./kernel/group-runtime-manager";
+import { log } from "./logger";
+import { DatabaseImageMessagePreprocessor } from "./runtime/image-message-preprocessor";
+import {
+  MiniMaxTokenPlanMcpClient,
+  resolveMiniMaxTokenPlanMcpConfig,
+} from "./runtime/minimax-token-plan-mcp";
 import { WorkspaceService } from "./workspace-service";
+import { createRuntimeInputPreprocessor } from "./runtime/runtime-input-preprocessor";
 
 export interface CliArgs {
   workspace?: string;
@@ -266,15 +273,31 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   }
 
   const stateStore = new CliStateStore(resolve(rootDir, "store/cli-state.json"));
-  const channelManager = new ChannelManager(db);
+  const channelManager = new ChannelManager(db, { rootDir });
   registerOutboundFeishuChannel(channelManager);
   let runtimeHost: OctoCliRuntimeHost | null = null;
+  const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
+  if (!minimaxTokenPlanConfig.apiKey) {
+    log.warn("cli", "MINIMAX_API_KEY not set, image preprocessing will downgrade to failure placeholders");
+  }
+  const minimaxTokenPlanClient = new MiniMaxTokenPlanMcpClient(minimaxTokenPlanConfig);
+  const imageMessagePreprocessor = new DatabaseImageMessagePreprocessor({
+    analyzeImage: minimaxTokenPlanClient,
+    db,
+  });
+  const runtimeInputPreprocessor = createRuntimeInputPreprocessor({
+    db,
+    rootDir,
+    workspaceService,
+    imageMessagePreprocessor,
+  });
 
   const manager = new GroupRuntimeManager({
     db,
     workspaceService,
     rootDir,
     createMessageSender: createCliMessageSender(db, channelManager),
+    preparePrompt: runtimeInputPreprocessor.prepare,
     getExtensionFactories: () => [
       createOctoGroupExtension({
         workspaceService,
@@ -308,6 +331,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<void> {
   try {
     await interactiveMode.run();
   } finally {
+    await minimaxTokenPlanClient.close();
     await channelManager.stopAll();
     await manager.dispose();
     db.close(false);
