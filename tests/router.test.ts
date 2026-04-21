@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initDatabase, getRouterState, insertMessage, registerGroup } from "../src/db";
+import { initDatabase, getRouterState, insertMessage } from "../src/db";
 import { __test__ as routerTestHelpers } from "../src/router";
 import { WorkspaceService } from "../src/workspace-service";
 
@@ -13,14 +13,20 @@ describe("router /clear command", () => {
     try {
       mkdirSync(join(dir, "store"), { recursive: true });
       const db = initDatabase(join(dir, "store", "messages.db"));
-      registerGroup(db, {
-        jid: "oc_main",
+      const workspaceService = new WorkspaceService(db, { rootDir: dir });
+      const workspace = workspaceService.createWorkspace({
         name: "Main Group",
         folder: "main",
-        channelType: "feishu",
-        requiresTrigger: false,
-        isMain: true,
         profileKey: "claude",
+        isMain: true,
+      });
+      workspaceService.createChat(workspace.id, {
+        title: "Main Group",
+        requiresTrigger: false,
+        externalBinding: {
+          platform: "feishu",
+          externalChatId: "oc_main",
+        },
       });
 
       insertMessage(db, {
@@ -45,8 +51,12 @@ describe("router /clear command", () => {
       };
       const groupQueue = {
         isActive: () => false,
-        enqueue: () => {
+        enqueue: async () => {
           enqueueCount += 1;
+          return {
+            status: "completed",
+            failureNotified: false,
+          };
         },
         pushMessage: () => {
           pushCount += 1;
@@ -63,12 +73,11 @@ describe("router /clear command", () => {
         },
       };
 
-      routerTestHelpers.processMessages(
+      await routerTestHelpers.processMessages(
         db,
         channelManager as never,
         groupQueue as never,
       );
-      await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(clearCount).toBe(1);
       expect(enqueueCount).toBe(0);
@@ -87,7 +96,7 @@ describe("router /clear command", () => {
     }
   });
 
-  test("routes unmentioned Feishu messages when the chat allows direct replies", () => {
+  test("routes unmentioned Feishu messages when the chat allows direct replies", async () => {
     const dir = mkdtempSync(join(tmpdir(), "octo-router-feishu-direct-"));
 
     try {
@@ -113,9 +122,13 @@ describe("router /clear command", () => {
       let lastPrompt = "";
       const groupQueue = {
         isActive: () => false,
-        enqueue: (_chatId: string, prompt: string) => {
+        enqueue: async (_chatId: string, prompt: string) => {
           enqueueCount += 1;
           lastPrompt = prompt;
+          return {
+            status: "completed",
+            failureNotified: false,
+          };
         },
         pushMessage: () => false,
         clearSession: async () => ({
@@ -126,7 +139,7 @@ describe("router /clear command", () => {
         }),
       };
 
-      routerTestHelpers.processMessages(
+      await routerTestHelpers.processMessages(
         db,
         { send: async () => {} } as never,
         groupQueue as never,
@@ -139,6 +152,63 @@ describe("router /clear command", () => {
       expect(getRouterState(db, `last_timestamp:${chat.id}`)).toBe(
         "2026-04-21T10:00:00.000Z",
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not advance the cursor when enqueue fails without notifying the chat", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "octo-router-feishu-retry-"));
+
+    try {
+      mkdirSync(join(dir, "store"), { recursive: true });
+      const db = initDatabase(join(dir, "store", "messages.db"));
+      const workspaceService = new WorkspaceService(db, { rootDir: dir });
+      const workspace = workspaceService.ensureFeishuWorkspace("cli_test_app", {
+        profileKey: "claude",
+      });
+      const chat = workspaceService.ensureFeishuChat(workspace.id, "oc_retry");
+
+      insertMessage(db, {
+        id: "msg-retry",
+        chatId: "oc_retry",
+        sender: "u1",
+        senderName: "Alice",
+        content: "重试我",
+        timestamp: "2026-04-21T10:05:00.000Z",
+        isFromMe: false,
+      });
+
+      let enqueueCount = 0;
+      const groupQueue = {
+        isActive: () => false,
+        enqueue: async () => {
+          enqueueCount += 1;
+          return {
+            status: "failed",
+            failureMessage: "AI 运行失败: Connection error.",
+            failureNotified: false,
+          };
+        },
+        pushMessage: () => false,
+        clearSession: async () => ({
+          closedActiveSession: false,
+          previousSessionRef: "old-session",
+          sessionRef: "new-session",
+          generation: 1,
+        }),
+      };
+
+      await routerTestHelpers.processMessages(
+        db,
+        { send: async () => {} } as never,
+        groupQueue as never,
+        workspaceService,
+      );
+
+      expect(enqueueCount).toBe(1);
+      expect(getRouterState(db, `last_timestamp:${chat.id}`)).toBeNull();
+      expect(getRouterState(db, "last_timestamp:oc_retry")).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

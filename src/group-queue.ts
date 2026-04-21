@@ -27,6 +27,7 @@ import { createWorkspaceToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
 import { WorkspaceService } from "./workspace-service";
+import type { EnqueueRuntimeResult } from "./runtime/group-runtime-controller";
 
 const TAG = "group-queue";
 
@@ -158,7 +159,10 @@ export class GroupQueue {
     return this.activeConversations.has(this.resolveTarget(chatOrGroupId).chat.id);
   }
 
-  async enqueue(chatOrGroupId: string, initialPrompt: string): Promise<void> {
+  async enqueue(
+    chatOrGroupId: string,
+    initialPrompt: string,
+  ): Promise<EnqueueRuntimeResult> {
     const target = this.resolveTarget(chatOrGroupId);
     log.info(TAG, `Enqueuing agent task for chat: ${target.chat.id}`, {
       activeTasks: this.activeTasks,
@@ -183,6 +187,11 @@ export class GroupQueue {
         this.locks.delete(target.chat.id);
       }
     });
+
+    return {
+      status: "completed",
+      failureNotified: false,
+    };
   }
 
   private async runWithConcurrencyLimit(

@@ -9,7 +9,10 @@ import {
   type MessageRow,
 } from "./db";
 import { log } from "./logger";
-import type { GroupRuntimeController } from "./runtime/group-runtime-controller";
+import type {
+  EnqueueRuntimeResult,
+  GroupRuntimeController,
+} from "./runtime/group-runtime-controller";
 import { WorkspaceService } from "./workspace-service";
 
 const TAG = "router";
@@ -60,24 +63,36 @@ export function startMessageLoop(
   workspaceService?: WorkspaceService,
   intervalMs = 2000,
 ): ReturnType<typeof setInterval> {
+  let isProcessing = false;
   const timer = setInterval(() => {
-    try {
-      processMessages(db, channelManager, groupQueue, workspaceService);
-    } catch (error) {
-      log.error(TAG, "Message loop error", error);
+    if (isProcessing) {
+      return;
     }
+
+    isProcessing = true;
+    void processMessages(db, channelManager, groupQueue, workspaceService)
+      .catch((error) => {
+        log.error(TAG, "Message loop error", error);
+      })
+      .finally(() => {
+        isProcessing = false;
+      });
   }, intervalMs);
 
   log.info(TAG, `Message loop started (interval: ${intervalMs}ms)`);
   return timer;
 }
 
-function processMessages(
+function shouldAdvanceCursor(result: EnqueueRuntimeResult): boolean {
+  return result.status === "completed" || result.failureNotified;
+}
+
+async function processMessages(
   db: Database,
   channelManager: ChannelManager,
   groupQueue: GroupRuntimeController,
   workspaceService = new WorkspaceService(db),
-): void {
+): Promise<void> {
   for (const workspace of workspaceService.listWorkspaces()) {
     for (const chat of workspaceService.listChats(workspace.id)) {
       const binding = listChatBindingsForChat(db, chat.id)[0] ?? null;
@@ -127,12 +142,21 @@ function processMessages(
 
       const prompt = formatMessagesAsPrompt(messages);
       if (groupQueue.isActive(chat.id)) {
-        groupQueue.pushMessage(chat.id, {
+        const accepted = groupQueue.pushMessage(chat.id, {
           mode: "follow_up",
           text: prompt,
         });
+        if (!accepted) {
+          const result = await groupQueue.enqueue(chat.id, prompt);
+          if (!shouldAdvanceCursor(result)) {
+            continue;
+          }
+        }
       } else {
-        void groupQueue.enqueue(chat.id, prompt);
+        const result = await groupQueue.enqueue(chat.id, prompt);
+        if (!shouldAdvanceCursor(result)) {
+          continue;
+        }
       }
 
       const lastProcessed = messages[messages.length - 1]!;

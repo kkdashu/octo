@@ -3,11 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
-import {
-  getGroupByFolder,
-  initDatabase,
-  registerGroup,
-} from "../src/db";
+import { initDatabase } from "../src/db";
 import { FeishuGroupAdapter } from "../src/runtime/feishu-group-adapter";
 import type { ImageMessagePreprocessor } from "../src/runtime/image-message-preprocessor";
 import type { PiGroupSessionHost } from "../src/runtime/pi-group-runtime-factory";
@@ -30,17 +26,22 @@ function flushMicrotasks(): Promise<void> {
 function createWorkspace() {
   const dir = mkdtempSync(join(tmpdir(), "octo-feishu-group-adapter-"));
   mkdirSync(join(dir, "store"), { recursive: true });
-  mkdirSync(join(dir, "groups", "main"), { recursive: true });
 
   const db = initDatabase(join(dir, "store", "messages.db"));
-  registerGroup(db, {
-    jid: "oc_main",
+  const workspaceService = new WorkspaceService(db, { rootDir: dir });
+  const workspace = workspaceService.createWorkspace({
     name: "Main Group",
     folder: "main",
-    channelType: "feishu",
-    requiresTrigger: false,
-    isMain: true,
     profileKey: "minimax-cn",
+    isMain: true,
+  });
+  workspaceService.createChat(workspace.id, {
+    title: "Main Group",
+    requiresTrigger: false,
+    externalBinding: {
+      platform: "feishu",
+      externalChatId: "oc_main",
+    },
   });
 
   return {
@@ -223,17 +224,21 @@ describe("FeishuGroupAdapter", () => {
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => `prepared:${text}`,
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           observedSessionRefs.push(getMainChatSessionRef(workspace.db, workspace.dir));
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           createdHosts.push(fake);
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
       const firstTurn = adapter.enqueue("main", "hello");
@@ -256,7 +261,8 @@ describe("FeishuGroupAdapter", () => {
       await flushMicrotasks();
 
       expect(createdHosts).toHaveLength(2);
-      expect(observedSessionRefs).toEqual([null, "session-1-done.jsonl"]);
+      expect(observedSessionRefs[0]).not.toBeNull();
+      expect(observedSessionRefs[1]).toBe("session-1-done.jsonl");
       expect(getMainChatSessionRef(workspace.db, workspace.dir)).toBe("session-1-done.jsonl");
       expect(sent).toEqual([
         { chatJid: "oc_main", text: "reply:prepared:hello" },
@@ -290,28 +296,33 @@ describe("FeishuGroupAdapter", () => {
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           createdHosts.push(fake);
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
       const turn = adapter.enqueue("main", "hello");
       await flushMicrotasks();
 
+      const previousSessionRef = getMainChatSessionRef(workspace.db, workspace.dir);
       const result = await adapter.clearSession("main");
       await turn;
       await flushMicrotasks();
 
       expect(result).toEqual({
         closedActiveSession: true,
-        previousSessionRef: null,
+        previousSessionRef,
         sessionRef: "fresh-session.jsonl",
         generation: 1,
       });
@@ -335,16 +346,20 @@ describe("FeishuGroupAdapter", () => {
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           createdHosts.push(fake);
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
       const turn = adapter.enqueue("main", "hello");
@@ -353,9 +368,15 @@ describe("FeishuGroupAdapter", () => {
       createdHosts[0]!.releaseWithAssistantError(
         "401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid api key\"}}",
       );
-      await turn;
+      const result = await turn;
       await flushMicrotasks();
 
+      expect(result).toEqual({
+        status: "failed",
+        failureMessage:
+          "AI 运行失败: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid api key\"}}",
+        failureNotified: true,
+      });
       expect(sent).toEqual([
         {
           chatJid: "oc_main",
@@ -378,23 +399,32 @@ describe("FeishuGroupAdapter", () => {
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           const fake = createDeferredSessionHost("session-1");
           fake.host.session.prompt = async () => {
             throw new Error("401 invalid api key");
           };
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
-      await adapter.enqueue("main", "hello");
+      const result = await adapter.enqueue("main", "hello");
       await flushMicrotasks();
 
+      expect(result).toEqual({
+        status: "failed",
+        failureMessage: "AI 运行失败: 401 invalid api key",
+        failureNotified: true,
+      });
       expect(sent).toEqual([
         {
           chatJid: "oc_main",
@@ -428,16 +458,20 @@ describe("FeishuGroupAdapter", () => {
           }
           return `prepared:${text}`;
         },
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           createdHosts.push(fake);
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
       const turn = adapter.enqueue("main", "slow-image");
@@ -487,7 +521,7 @@ describe("FeishuGroupAdapter", () => {
         channelManager: createFakeChannelManager(sent),
         imageMessagePreprocessor: createPassthroughImagePreprocessor(),
         preparePrompt: async (_groupFolder, text) => text,
-        createGroupSessionHost: async (groupFolder) => {
+        createChatSessionHost: async (chatId) => {
           const fake = createDeferredSessionHost(`session-${createdHosts.length + 1}`);
           const originalFollowUp = fake.host.session.followUp.bind(fake.host.session);
           fake.host.session.followUp = async (text: string) => {
@@ -497,13 +531,17 @@ describe("FeishuGroupAdapter", () => {
             await originalFollowUp(text);
           };
           createdHosts.push(fake);
+          const workspaceService = new WorkspaceService(workspace.db, { rootDir: workspace.dir });
+          const chat = workspaceService.getChatById(chatId)!;
+          const ownerWorkspace = workspaceService.getWorkspaceById(chat.workspace_id)!;
           return {
             host: fake.host,
-            group: getGroupByFolder(workspace.db, groupFolder)!,
+            workspace: ownerWorkspace,
+            chat,
             sessionRef: fake.host.session.sessionFile!,
           };
         },
-        resetGroupSession: async () => "fresh-session.jsonl",
+        resetChatSession: async () => "fresh-session.jsonl",
       });
 
       const turn = adapter.enqueue("main", "hello");

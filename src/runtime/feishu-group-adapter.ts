@@ -20,6 +20,7 @@ import type { ConversationMessageInput } from "../providers/types";
 import type { ImageMessagePreprocessor } from "./image-message-preprocessor";
 import type {
   ClearGroupSessionResult,
+  EnqueueRuntimeResult,
   GroupRuntimeController,
 } from "./group-runtime-controller";
 import type {
@@ -57,10 +58,13 @@ type ActiveChatSession = {
   chat: ChatRow;
   generation: number;
   unsubscribe: () => void;
-  reportedRuntimeFailures: Set<string>;
   pendingInitialInputs: ConversationMessageInput[];
   initialInputPending: boolean;
   initialInputFlush: Promise<void> | null;
+  assistantTextCount: number;
+  lastRuntimeFailure: string | null;
+  recordedRuntimeFailures: Set<string>;
+  notifiedRuntimeFailures: Set<string>;
   closed: boolean;
   runId: string;
 };
@@ -223,7 +227,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
 
     void this.sendInput(activeSession, input).catch((error) => {
       log.error(TAG, `Failed to push ${input.mode} message to ${chat.id}`, error);
-      void this.reportRuntimeFailure(activeSession, error);
+      void this.notifyRuntimeFailure(activeSession, error);
     });
     return true;
   }
@@ -234,7 +238,7 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     return activeSession?.chat.id === chat.id;
   }
 
-  async enqueue(chatId: string, initialPrompt: string): Promise<void> {
+  async enqueue(chatId: string, initialPrompt: string): Promise<EnqueueRuntimeResult> {
     const chat = this.resolveChat(chatId);
     const existing = this.locks.get(chat.workspace_id);
     const task = (existing ?? Promise.resolve()).then(() =>
@@ -343,7 +347,10 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     };
   }
 
-  private async runTurn(chatId: string, initialPrompt: string): Promise<void> {
+  private async runTurn(
+    chatId: string,
+    initialPrompt: string,
+  ): Promise<EnqueueRuntimeResult> {
     const initialChat = this.resolveChat(chatId);
     const initialWorkspace = this.getWorkspaceForChat(initialChat);
     await this.waitForConcurrencySlot(initialWorkspace.id);
@@ -393,10 +400,13 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         chat: created.chat,
         generation: sessionGeneration,
         unsubscribe: () => undefined,
-        reportedRuntimeFailures: new Set(),
         pendingInitialInputs: [],
         initialInputPending: true,
         initialInputFlush: null,
+        assistantTextCount: 0,
+        lastRuntimeFailure: null,
+        recordedRuntimeFailures: new Set(),
+        notifiedRuntimeFailures: new Set(),
         closed: false,
         runId: run.id,
       };
@@ -424,13 +434,41 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
         this.persistSessionRef(activeSession.chat.id, sessionRef);
       }
 
+      if (activeSession.lastRuntimeFailure && activeSession.assistantTextCount === 0) {
+        const failureNotified = await this.notifyRuntimeFailure(
+          activeSession,
+          activeSession.lastRuntimeFailure,
+        );
+        this.finishRun(activeSession, "failed", activeSession.lastRuntimeFailure);
+        return {
+          status: "failed",
+          failureMessage: activeSession.lastRuntimeFailure,
+          failureNotified,
+        };
+      }
+
       this.finishRun(activeSession, "completed");
+      return {
+        status: "completed",
+        failureNotified: false,
+      };
     } catch (error) {
       log.error(TAG, `Failed to run turn for chat ${initialChat.id}`, error);
       if (activeSession) {
-        this.finishRun(activeSession, "failed", toError(error).message);
-        await this.reportRuntimeFailure(activeSession, error);
+        const failureMessage = this.recordRuntimeFailure(activeSession, error);
+        const failureNotified = await this.notifyRuntimeFailure(activeSession, failureMessage);
+        this.finishRun(activeSession, "failed", failureMessage);
+        return {
+          status: "failed",
+          failureMessage,
+          failureNotified,
+        };
       }
+      return {
+        status: "failed",
+        failureMessage: toError(error).message,
+        failureNotified: false,
+      };
     } finally {
       if (
         activeSession
@@ -512,13 +550,16 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       const text = collectAssistantText(message);
 
       if (text) {
+        activeSession.assistantTextCount += 1;
         this.appendRuntimeEvent(activeSession, "assistant_text", { text });
-        void this.enqueueOutboundMessage(activeSession.chat, text);
+        void this.enqueueOutboundMessage(activeSession.chat, text).catch((error) => {
+          this.recordRuntimeFailure(activeSession, error);
+        });
       }
 
       const runtimeFailure = extractAssistantRuntimeFailure(message);
       if (runtimeFailure) {
-        void this.reportRuntimeFailure(activeSession, runtimeFailure);
+        this.recordRuntimeFailure(activeSession, runtimeFailure);
       }
       return;
     }
@@ -538,20 +579,40 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     }
   }
 
-  private async reportRuntimeFailure(
+  private recordRuntimeFailure(
     activeSession: ActiveChatSession,
     error: unknown,
-  ): Promise<void> {
+  ): string {
     const formatted = formatRuntimeFailureMessage(error);
-    if (activeSession.reportedRuntimeFailures.has(formatted)) {
-      return;
+    activeSession.lastRuntimeFailure = formatted;
+    if (activeSession.recordedRuntimeFailures.has(formatted)) {
+      return formatted;
     }
 
-    activeSession.reportedRuntimeFailures.add(formatted);
+    activeSession.recordedRuntimeFailures.add(formatted);
     this.appendRuntimeEvent(activeSession, "error", {
       message: formatted,
     });
-    await this.enqueueOutboundMessage(activeSession.chat, formatted);
+    return formatted;
+  }
+
+  private async notifyRuntimeFailure(
+    activeSession: ActiveChatSession,
+    error: unknown,
+  ): Promise<boolean> {
+    const formatted = this.recordRuntimeFailure(activeSession, error);
+    if (activeSession.notifiedRuntimeFailures.has(formatted)) {
+      return true;
+    }
+
+    try {
+      await this.enqueueOutboundMessage(activeSession.chat, formatted);
+      activeSession.notifiedRuntimeFailures.add(formatted);
+      return true;
+    } catch (sendError) {
+      log.error(TAG, `Failed to send runtime failure for ${activeSession.chat.id}`, sendError);
+      return false;
+    }
   }
 
   private async enqueueOutboundMessage(
@@ -570,21 +631,18 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
     const task = (existing ?? Promise.resolve()).then(async () => {
       await this.options.channelManager.send(binding.external_chat_id, text);
     });
-    const lockPromise = task.then(
-      () => undefined,
-      () => undefined,
-    );
 
-    this.outboundLocks.set(chat.id, lockPromise);
-    task.catch((error) => {
-      log.error(TAG, `Failed to send assistant reply for ${chat.id}`, error);
-    }).finally(() => {
-      if (this.outboundLocks.get(chat.id) === lockPromise) {
+    // Prevent detached event handlers from triggering unhandled rejections while
+    // preserving the original task rejection for waitForOutboundDrain().
+    task.catch(() => undefined);
+    this.outboundLocks.set(chat.id, task);
+    task.finally(() => {
+      if (this.outboundLocks.get(chat.id) === task) {
         this.outboundLocks.delete(chat.id);
       }
     });
 
-    return lockPromise;
+    return task;
   }
 
   private async waitForOutboundDrain(chatId: string): Promise<void> {
