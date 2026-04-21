@@ -176,10 +176,6 @@ describe("reset workspace chat state script", () => {
          )`,
       ).run();
       db.query(
-        `INSERT INTO sessions (group_folder, session_ref)
-         VALUES ('demo', 'session.jsonl')`,
-      ).run();
-      db.query(
         `INSERT INTO group_memories (group_folder, key, key_type, value, source, created_at, updated_at)
          VALUES ('demo', 'topic', 'builtin', 'demo', 'user', '2026-04-21T00:00:00.000Z', '2026-04-21T00:00:00.000Z')`,
       ).run();
@@ -248,7 +244,6 @@ describe("reset workspace chat state script", () => {
       expect(countRows(dbPath, "run_events")).toBe(0);
       expect(countRows(dbPath, "workspace_memories")).toBe(0);
       expect(countRows(dbPath, "scheduled_tasks")).toBe(0);
-      expect(countRows(dbPath, "sessions")).toBe(0);
       expect(countRows(dbPath, "group_memories")).toBe(0);
       expect(countRows(dbPath, "registered_groups")).toBe(0);
       expect(countRows(dbPath, "messages")).toBe(0);

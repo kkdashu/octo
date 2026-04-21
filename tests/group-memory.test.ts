@@ -6,24 +6,22 @@ import { join } from "node:path";
 import type { ChannelManager } from "../src/channels/manager";
 import {
   BUILTIN_GROUP_MEMORY_KEYS,
-  clearAllSessionRefs,
   clearGroupMemories,
   createTask,
   deleteGroupMemory,
-  getSessionRef,
   initDatabase,
   isBuiltinGroupMemoryKey,
   isSupportedGroupMemoryKey,
   isValidCustomGroupMemoryKey,
   listGroupMemories,
   registerGroup,
-  saveSessionRef,
   upsertGroupMemory,
   validateGroupMemoryKey,
 } from "../src/db";
 import { GroupQueue } from "../src/group-queue";
 import { __test__ as schedulerTestHelpers } from "../src/task-scheduler";
 import { createGroupToolDefs } from "../src/tools";
+import { WorkspaceService } from "../src/workspace-service";
 import type {
   AgentRuntime,
   ConversationMessageInput,
@@ -69,6 +67,51 @@ function createWorkspace(): { dir: string; db: Database } {
   });
 
   return { dir, db };
+}
+
+function updateChatSessionRef(
+  db: Database,
+  rootDir: string,
+  folder: string,
+  sessionRef: string | null,
+): void {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  const workspace = workspaceService.getWorkspaceByFolder(folder);
+  if (!workspace) {
+    throw new Error(`Workspace missing for ${folder}`);
+  }
+  const chat = workspaceService.listChats(workspace.id)[0];
+  if (!chat) {
+    throw new Error(`Chat missing for ${folder}`);
+  }
+  workspaceService.updateChat(chat.id, { sessionRef });
+}
+
+function getChatSessionRef(
+  db: Database,
+  rootDir: string,
+  folder: string,
+): string | null {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  const workspace = workspaceService.getWorkspaceByFolder(folder);
+  if (!workspace) {
+    throw new Error(`Workspace missing for ${folder}`);
+  }
+  return workspaceService.listChats(workspace.id)[0]?.session_ref ?? null;
+}
+
+function clearAllChatSessionRefs(db: Database, rootDir: string): number {
+  const workspaceService = new WorkspaceService(db, { rootDir });
+  let count = 0;
+  for (const workspace of workspaceService.listWorkspaces()) {
+    for (const chat of workspaceService.listChats(workspace.id)) {
+      if (chat.session_ref) {
+        count += 1;
+        workspaceService.updateChat(chat.id, { sessionRef: null });
+      }
+    }
+  }
+  return count;
 }
 
 function createFakeChannelManager(): ChannelManager {
@@ -207,12 +250,12 @@ describe("group memory data layer", () => {
     const { dir, db } = createWorkspace();
     cleanupDirs.push(dir);
 
-    saveSessionRef(db, "main", "session-main");
-    saveSessionRef(db, "english-group", "session-english");
+    updateChatSessionRef(db, dir, "main", "session-main");
+    updateChatSessionRef(db, dir, "english-group", "session-english");
 
-    expect(clearAllSessionRefs(db)).toBe(2);
-    expect(getSessionRef(db, "main")).toBeNull();
-    expect(getSessionRef(db, "english-group")).toBeNull();
+    expect(clearAllChatSessionRefs(db, dir)).toBe(2);
+    expect(getChatSessionRef(db, dir, "main")).toBeNull();
+    expect(getChatSessionRef(db, dir, "english-group")).toBeNull();
   });
 });
 
@@ -513,11 +556,11 @@ describe("clear session concurrency protection", () => {
 
     const clearResult = await groupQueue.clearSession("main");
     expect(clearResult.sessionRef).toBe("fresh-session");
-    expect(getSessionRef(db, "main")).toBe("fresh-session");
+    expect(getChatSessionRef(db, dir, "main")).toBe("fresh-session");
 
     releaseResult();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(getSessionRef(db, "main")).toBe("fresh-session");
+    expect(getChatSessionRef(db, dir, "main")).toBe("fresh-session");
   });
 });

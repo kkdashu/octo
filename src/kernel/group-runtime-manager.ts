@@ -159,7 +159,6 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
           createMessageSender: options.createMessageSender,
           getExtensionFactories: options.getExtensionFactories,
           sessionRefOverride: chat.session_ref,
-          persistSessionRef: false,
         });
 
         return {

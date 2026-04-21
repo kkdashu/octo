@@ -43,13 +43,6 @@ export function initDatabase(dbPath: string): Database {
   `);
 
   db.run(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT PRIMARY KEY,
-      session_ref TEXT NOT NULL
-    )
-  `);
-
-  db.run(`
     CREATE TABLE IF NOT EXISTS image_understanding_cache (
       cache_key TEXT PRIMARY KEY,
       image_path TEXT NOT NULL,
@@ -211,9 +204,9 @@ export function initDatabase(dbPath: string): Database {
     // Column already exists, ignore
   }
   migrateRegisteredGroupsProfileKey(db);
-  migrateSessionsSessionRef(db);
   migrateWorkspacesProfileKey(db);
   migrateChatsTriggerConfig(db);
+  dropLegacySessionsTable(db);
 
   return db;
 }
@@ -251,17 +244,6 @@ function migrateRegisteredGroupsProfileKey(db: Database): void {
   ).run({ profileKey: getDefaultProfileKey() });
 }
 
-function migrateSessionsSessionRef(db: Database): void {
-  const columns = getTableColumns(db, "sessions");
-  if (columns.includes("session_ref")) {
-    return;
-  }
-
-  if (columns.includes("session_id")) {
-    db.run("ALTER TABLE sessions RENAME COLUMN session_id TO session_ref");
-  }
-}
-
 function migrateWorkspacesProfileKey(db: Database): void {
   const columns = getTableColumns(db, "workspaces");
 
@@ -289,6 +271,10 @@ function migrateChatsTriggerConfig(db: Database): void {
   if (!columns.includes("requires_trigger")) {
     db.run("ALTER TABLE chats ADD COLUMN requires_trigger INTEGER NOT NULL DEFAULT 1");
   }
+}
+
+function dropLegacySessionsTable(db: Database): void {
+  db.run("DROP TABLE IF EXISTS sessions");
 }
 
 function getLegacyWorkspaceId(folder: string): string {
@@ -430,7 +416,6 @@ function ensureLegacyChatRecord(
 ): ChatRow {
   const bindingPlatform = normalizeBindingPlatform(group.channel_type);
   const existingByBinding = getChatByBinding(db, bindingPlatform, group.jid);
-  const migratedSessionRef = getSessionRef(db, group.folder);
 
   if (existingByBinding) {
     db.query(
@@ -438,7 +423,6 @@ function ensureLegacyChatRecord(
        SET workspace_id = $workspaceId,
            title = $title,
            active_branch = COALESCE(NULLIF(active_branch, ''), $activeBranch),
-           session_ref = COALESCE(session_ref, $sessionRef),
            trigger_pattern = $triggerPattern,
            requires_trigger = $requiresTrigger,
            updated_at = $updatedAt
@@ -448,7 +432,6 @@ function ensureLegacyChatRecord(
       workspaceId: workspace.id,
       title: group.name,
       activeBranch: workspace.default_branch,
-      sessionRef: migratedSessionRef,
       triggerPattern: group.trigger_pattern,
       requiresTrigger: group.requires_trigger,
       updatedAt: new Date().toISOString(),
@@ -477,7 +460,7 @@ function ensureLegacyChatRecord(
        $workspaceId,
        $title,
        $activeBranch,
-       $sessionRef,
+       NULL,
        'active',
        $triggerPattern,
        $requiresTrigger,
@@ -490,7 +473,6 @@ function ensureLegacyChatRecord(
     workspaceId: workspace.id,
     title: group.name,
     activeBranch: workspace.default_branch,
-    sessionRef: migratedSessionRef,
     triggerPattern: group.trigger_pattern,
     requiresTrigger: group.requires_trigger,
     createdAt,
@@ -1926,67 +1908,6 @@ export function clearGroupMemories(
     ).run({ workspaceId: workspace.id });
   }
 
-  return row.count;
-}
-
-// ---------------------------------------------------------------------------
-// Sessions
-// ---------------------------------------------------------------------------
-
-export function getSessionRef(
-  db: Database,
-  folder: string,
-): string | null {
-  const row = db
-    .query("SELECT session_ref FROM sessions WHERE group_folder = $groupFolder")
-    .get({ groupFolder: folder }) as { session_ref: string } | null;
-  return row?.session_ref ?? null;
-}
-
-export function saveSessionRef(
-  db: Database,
-  folder: string,
-  sessionRef: string,
-) {
-  db.query(
-    `INSERT INTO sessions (group_folder, session_ref) VALUES ($groupFolder, $sessionRef)
-     ON CONFLICT(group_folder) DO UPDATE SET session_ref = $sessionRef`,
-  ).run({ groupFolder: folder, sessionRef });
-
-  const workspace = getWorkspaceByFolder(db, folder);
-  if (workspace) {
-    const chat = listChatsForWorkspace(db, workspace.id)[0] ?? null;
-    if (chat) {
-      updateChat(db, chat.id, { sessionRef });
-    }
-  }
-}
-
-export function deleteSessionRef(
-  db: Database,
-  folder: string,
-) {
-  db.query(
-    "DELETE FROM sessions WHERE group_folder = $groupFolder",
-  ).run({ groupFolder: folder });
-
-  const workspace = getWorkspaceByFolder(db, folder);
-  if (workspace) {
-    const chat = listChatsForWorkspace(db, workspace.id)[0] ?? null;
-    if (chat) {
-      updateChat(db, chat.id, { sessionRef: null });
-    }
-  }
-}
-
-export function clearAllSessionRefs(
-  db: Database,
-): number {
-  const row = db
-    .query("SELECT COUNT(*) AS count FROM sessions")
-    .get() as { count: number };
-  db.run("DELETE FROM sessions");
-  db.run("UPDATE chats SET session_ref = NULL, updated_at = CURRENT_TIMESTAMP");
   return row.count;
 }
 

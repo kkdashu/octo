@@ -47,13 +47,8 @@ describe("pi group runtime factory", () => {
       const explicitSession = join(sessionDir, "chat-2.jsonl");
 
       const resolved = resolveGroupSessionRef(
-        db,
-        "atlas",
         workingDirectory,
-        {
-          sessionRefOverride: explicitSession,
-          persistResolvedRef: false,
-        },
+        explicitSession,
       );
 
       expect(recentSession).not.toBe(explicitSession);

@@ -4,7 +4,6 @@ import {
   createRun,
   getChatById,
   listChatBindingsForChat,
-  saveSessionRef,
   updateChat,
   updateRun,
   upsertWorkspaceRuntimeState,
@@ -183,7 +182,6 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
           groupFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
           sessionRefOverride: chat.session_ref,
-          persistSessionRef: false,
         });
 
         return {
@@ -211,7 +209,6 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
           groupFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
           sessionRefOverride: chat.session_ref,
-          persistSessionRef: false,
         });
 
         try {
@@ -700,11 +697,6 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       sessionRef,
       lastActivityAt: new Date().toISOString(),
     });
-    if (sessionRef) {
-      const chat = this.resolveChat(chatId);
-      const workspace = this.getWorkspaceForChat(chat);
-      saveSessionRef(this.options.db, workspace.folder, sessionRef);
-    }
   }
 
   private ensureWorkspaceOnChatBranch(

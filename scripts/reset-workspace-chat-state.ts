@@ -12,7 +12,6 @@ const TABLES_TO_CLEAR = [
   "workspace_memories",
   "workspaces",
   "scheduled_tasks",
-  "sessions",
   "group_memories",
   "registered_groups",
   "messages",

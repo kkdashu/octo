@@ -6,7 +6,7 @@ import {
   SessionManager,
   type AgentSessionRuntime,
 } from "@mariozechner/pi-coding-agent";
-import { getSessionRef, initDatabase, saveSessionRef } from "../src/db";
+import { initDatabase } from "../src/db";
 import { GroupService } from "../src/group-service";
 import { OctoCliRuntimeHost } from "../src/cli/octo-cli-runtime-host";
 import { CliStateStore } from "../src/cli/state-store";
@@ -149,7 +149,7 @@ describe("OctoCliRuntimeHost", () => {
       const secondCwd = join(rootDir, "groups", secondGroup.folder);
       const firstSessionPath = createSessionFile(firstCwd, "first");
       const secondSessionPath = createSessionFile(secondCwd, "second");
-      saveSessionRef(db, secondGroup.folder, secondSessionPath);
+      workspaceService.updateChat(secondChat.id, { sessionRef: secondSessionPath });
       const stateStore = new CliStateStore(join(rootDir, "cli-state.json"));
       const first = createFakeRuntime(firstSessionPath, firstCwd);
       const second = createFakeRuntime(secondSessionPath, secondCwd);
@@ -193,7 +193,7 @@ describe("OctoCliRuntimeHost", () => {
       expect(host.getCurrentWorkspace().folder).toBe(secondGroup.folder);
       expect(host.getCurrentChat().id).toBe(secondChat.id);
       expect(host.session.sessionFile).toBe(secondSessionPath);
-      expect(getSessionRef(db, secondGroup.folder)).toBe(secondSessionPath);
+      expect(workspaceService.getChatById(secondChat.id)?.session_ref).toBe(secondSessionPath);
       expect(stateStore.getCurrentGroupFolder()).toBe(secondGroup.folder);
       expect(stateStore.getCurrentWorkspaceFolder()).toBe(secondGroup.folder);
       expect(stateStore.getCurrentChatId()).toBe(secondChat.id);
