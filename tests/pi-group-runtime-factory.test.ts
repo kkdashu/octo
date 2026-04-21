@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { initDatabase } from "../src/db";
-import { getGroupForWorkingDirectory, resolveGroupSessionRef } from "../src/runtime/pi-group-runtime-factory";
+import {
+  getWorkspaceForWorkingDirectory,
+  resolveWorkspaceSessionRef,
+} from "../src/runtime/pi-group-runtime-factory";
 import { ensurePiSessionDir, materializePiSessionRef } from "../src/providers/pi-session-ref";
 import { WorkspaceService } from "../src/workspace-service";
 
@@ -46,7 +49,7 @@ describe("pi group runtime factory", () => {
       );
       const explicitSession = join(sessionDir, "chat-2.jsonl");
 
-      const resolved = resolveGroupSessionRef(
+      const resolved = resolveWorkspaceSessionRef(
         workingDirectory,
         explicitSession,
       );
@@ -63,7 +66,7 @@ describe("pi group runtime factory", () => {
     }
   });
 
-  test("falls back to workspace-backed runtime context when no legacy group exists", () => {
+  test("resolves workspace context from the workspace working directory", () => {
     const rootDir = mkdtempSync(join(tmpdir(), "octo-pi-runtime-factory-"));
     const previousProfilesPath = process.env.AGENT_PROFILES_PATH;
 
@@ -75,7 +78,7 @@ describe("pi group runtime factory", () => {
         profileKey: "claude",
       });
 
-      const resolved = getGroupForWorkingDirectory(
+      const resolved = getWorkspaceForWorkingDirectory(
         db,
         join(rootDir, "workspaces", workspace.folder),
         rootDir,
@@ -86,9 +89,8 @@ describe("pi group runtime factory", () => {
         folder: workspace.folder,
         name: workspace.name,
         profile_key: "claude",
-        requires_trigger: 0,
       });
-      expect(resolved?.jid).toBe(`workspace:${workspace.id}`);
+      expect(resolved?.id).toBe(workspace.id);
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

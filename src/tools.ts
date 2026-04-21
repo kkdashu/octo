@@ -2,44 +2,49 @@ import type { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import {
-  BUILTIN_GROUP_MEMORY_KEYS,
-  clearGroupMemories,
-  getGroupByFolder,
-  isSupportedGroupMemoryKey,
-  listGroups,
-  listGroupMemories,
-  registerGroup,
+  BUILTIN_WORKSPACE_MEMORY_KEYS,
+  clearWorkspaceMemories,
   createTask,
-  deleteGroupMemory,
+  deleteWorkspaceMemory,
+  getWorkspaceByFolder,
+  listChatBindingsForChat,
+  listChatsForWorkspace,
   listTasks,
-  type GroupMemoryRow,
-  type GroupMemoryKeyType,
-  upsertGroupMemory,
+  listWorkspaceMemories,
+  listWorkspaces,
+  isSupportedWorkspaceMemoryKey,
+  type WorkspaceMemoryKeyType,
+  type WorkspaceMemoryRow,
+  upsertWorkspaceMemory,
   updateTaskStatus,
-  updateGroupProfile,
-  validateGroupMemoryKey,
-  type RegisteredGroup,
+  updateWorkspace,
+  validateWorkspaceMemoryKey,
 } from "./db";
-import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
+import { getWorkspaceDirectory } from "./group-workspace";
+import { log } from "./logger";
+import type { ToolDefinition } from "./providers/types";
 import {
   generateMiniMaxImage,
   MINIMAX_IMAGE_ASPECT_RATIOS,
   MINIMAX_IMAGE_MODELS,
 } from "./runtime/minimax-image";
-import { getWorkspaceDirectory } from "./group-workspace";
+import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
-import { log } from "./logger";
-import type { ToolDefinition } from "./providers/types";
 
 const TAG = "tools";
 
-/** Abstraction over message sending — allows in-process or HTTP-forwarded implementations */
+function textResult(text: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+  };
+}
+
 export interface MessageSender {
-  send(chatJid: string, text: string): Promise<void>;
-  sendImage(chatJid: string, filePath: string): Promise<void>;
-  refreshGroupMetadata(): Promise<{ count: number }>;
-  clearSession?(groupFolder: string): Promise<{
+  send(externalChatId: string, text: string): Promise<void>;
+  sendImage(externalChatId: string, filePath: string): Promise<void>;
+  refreshChatMetadata(): Promise<{ count: number }>;
+  clearSession?(chatId: string): Promise<{
     closedActiveSession: boolean;
     previousSessionRef: string | null;
     sessionRef: string;
@@ -47,131 +52,177 @@ export interface MessageSender {
   }>;
 }
 
-type ResolveTargetChatResult =
-  | { ok: true; chatJid: string }
+export interface WorkspaceToolContext {
+  workspaceId: string;
+  workspaceFolder: string;
+  chatId: string;
+  isMain: boolean;
+}
+
+type ResolveTargetExternalChatIdResult =
+  | { ok: true; externalChatId: string }
   | { ok: false; message: string };
 
-type ResolveTargetGroupResult =
-  | { ok: true; group: RegisteredGroup }
+type ResolveTargetWorkspaceResult =
+  | {
+      ok: true;
+      workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>;
+      chatId: string;
+    }
   | { ok: false; message: string };
 
-const BUILTIN_GROUP_MEMORY_LABELS: Record<string, string> = {
+const BUILTIN_WORKSPACE_MEMORY_LABELS: Record<string, string> = {
   topic_context: "Topic context",
   response_language: "Response language",
   response_style: "Response style",
   interaction_rule: "Interaction rule",
 };
 
-function resolveTargetChatJid(
+function getPrimaryExternalChatId(
   db: Database,
-  groupFolder: string,
-  isMain: boolean,
-  requestedChatJid: unknown,
-): ResolveTargetChatResult {
-  const group = getGroupByFolder(db, groupFolder);
-  if (!group) {
-    return { ok: false, message: `Group not found: ${groupFolder}` };
-  }
+  chatId: string,
+): string | null {
+  const binding = listChatBindingsForChat(db, chatId)[0] ?? null;
+  return binding?.external_chat_id ?? null;
+}
 
-  const normalizedRequestedChatJid =
-    typeof requestedChatJid === "string" ? requestedChatJid.trim() : "";
-  const targetChatJid = normalizedRequestedChatJid || group.jid;
-
-  if (!isMain && targetChatJid !== group.jid) {
+function resolveTargetExternalChatId(
+  db: Database,
+  context: WorkspaceToolContext,
+  requestedExternalChatId: unknown,
+): ResolveTargetExternalChatIdResult {
+  const currentExternalChatId = getPrimaryExternalChatId(db, context.chatId);
+  if (!currentExternalChatId) {
     return {
       ok: false,
-      message: "Permission denied: cannot send to other groups",
+      message: `No outbound chat binding found for chat ${context.chatId}`,
+    };
+  }
+
+  const normalizedRequested =
+    typeof requestedExternalChatId === "string" ? requestedExternalChatId.trim() : "";
+  const targetExternalChatId = normalizedRequested || currentExternalChatId;
+
+  if (!context.isMain && targetExternalChatId !== currentExternalChatId) {
+    return {
+      ok: false,
+      message: "Permission denied: cannot send to other chats",
     };
   }
 
   return {
     ok: true,
-    chatJid: targetChatJid,
+    externalChatId: targetExternalChatId,
   };
 }
 
-function resolveTargetGroup(
+function getDefaultWorkspaceChatId(
   db: Database,
-  groupFolder: string,
-  isMain: boolean,
-  requestedTargetGroupFolder: unknown,
-): ResolveTargetGroupResult {
-  const currentGroup = getGroupByFolder(db, groupFolder);
-  if (!currentGroup) {
-    return { ok: false, message: `Group not found: ${groupFolder}` };
+  workspaceId: string,
+): string | null {
+  return listChatsForWorkspace(db, workspaceId)[0]?.id ?? null;
+}
+
+function resolveTargetWorkspace(
+  db: Database,
+  context: WorkspaceToolContext,
+  requestedTargetWorkspaceFolder: unknown,
+): ResolveTargetWorkspaceResult {
+  const currentWorkspace = getWorkspaceByFolder(db, context.workspaceFolder);
+  if (!currentWorkspace) {
+    return { ok: false, message: `Workspace not found: ${context.workspaceFolder}` };
   }
 
-  const normalizedRequestedFolder =
-    typeof requestedTargetGroupFolder === "string" ? requestedTargetGroupFolder.trim() : "";
-  const targetGroupFolder = normalizedRequestedFolder || currentGroup.folder;
+  const normalizedRequested =
+    typeof requestedTargetWorkspaceFolder === "string"
+      ? requestedTargetWorkspaceFolder.trim()
+      : "";
+  const targetWorkspace = normalizedRequested
+    ? getWorkspaceByFolder(db, normalizedRequested)
+    : currentWorkspace;
 
-  if (!isMain && targetGroupFolder !== currentGroup.folder) {
+  if (!targetWorkspace) {
+    return { ok: false, message: `Workspace not found: ${normalizedRequested}` };
+  }
+
+  if (!context.isMain && targetWorkspace.id !== currentWorkspace.id) {
     return {
       ok: false,
-      message: "Permission denied: cannot manage memory for other groups",
+      message: "Permission denied: cannot target another workspace",
     };
   }
 
-  const targetGroup = getGroupByFolder(db, targetGroupFolder);
-  if (!targetGroup) {
-    return { ok: false, message: `Group not found: ${targetGroupFolder}` };
+  const defaultChatId = getDefaultWorkspaceChatId(db, targetWorkspace.id);
+  if (!defaultChatId) {
+    return {
+      ok: false,
+      message: `Workspace has no chat: ${targetWorkspace.folder}`,
+    };
   }
 
-  return { ok: true, group: targetGroup };
+  return {
+    ok: true,
+    workspace: targetWorkspace,
+    chatId: defaultChatId,
+  };
 }
 
-function formatGroupLabel(group: RegisteredGroup): string {
-  return `"${group.name}" (${group.folder})`;
+function formatWorkspaceLabel(
+  workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>,
+): string {
+  return `"${workspace.name}" (${workspace.folder})`;
 }
 
 async function handleClearSessionTool(
   db: Database,
   sender: MessageSender,
-  targetGroupFolder: string,
+  targetWorkspaceFolder: string,
   toolName: string,
 ) {
-  log.info(TAG, `[${toolName}] called by main group`, { folder: targetGroupFolder });
-  const target = getGroupByFolder(db, targetGroupFolder);
-  if (!target) {
-    log.warn(TAG, `[${toolName}] Target group not found: ${targetGroupFolder}`);
-    return { content: [{ type: "text", text: `Group not found: ${targetGroupFolder}` }] };
+  const targetWorkspace = getWorkspaceByFolder(db, targetWorkspaceFolder);
+  if (!targetWorkspace) {
+    return textResult(`Workspace not found: ${targetWorkspaceFolder}`);
   }
+
+  const targetChatId = getDefaultWorkspaceChatId(db, targetWorkspace.id);
+  if (!targetChatId) {
+    return textResult(`Workspace has no chat: ${targetWorkspaceFolder}`);
+  }
+
   if (!sender.clearSession) {
     log.error(TAG, `[${toolName}] clearSession not available in sender`);
-    return { content: [{ type: "text", text: "Clear session not supported" }] };
+    return textResult("Clear session not supported");
   }
 
-  const result = await sender.clearSession(targetGroupFolder);
-  log.info(TAG, `[${toolName}] Session cleared for ${targetGroupFolder}`, result);
-
+  const result = await sender.clearSession(targetChatId);
   return {
     content: [
       {
         type: "text" as const,
         text: result.closedActiveSession
-          ? `Session cleared for group ${formatGroupLabel(target)}. A fresh AI session (${result.sessionRef}) is ready, and the previous active session was closed. This only clears the AI session.`
-          : `Session cleared for group ${formatGroupLabel(target)}. A fresh AI session (${result.sessionRef}) is ready for the next message. This only clears the AI session.`,
+          ? `Session cleared for workspace ${formatWorkspaceLabel(targetWorkspace)}. A fresh AI session (${result.sessionRef}) is ready, and the previous active session was closed.`
+          : `Session cleared for workspace ${formatWorkspaceLabel(targetWorkspace)}. A fresh AI session (${result.sessionRef}) is ready for the next message.`,
       },
     ],
   };
 }
 
-function formatGroupMemoryList(
-  group: RegisteredGroup,
-  memories: GroupMemoryRow[],
+function formatWorkspaceMemoryList(
+  workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>,
+  memories: WorkspaceMemoryRow[],
 ): string {
   if (memories.length === 0) {
-    return `No group memory configured for ${formatGroupLabel(group)}.`;
+    return `No workspace memory configured for ${formatWorkspaceLabel(workspace)}.`;
   }
 
   const builtinMemories = memories.filter((memory) => memory.key_type === "builtin");
   const customMemories = memories.filter((memory) => memory.key_type === "custom");
-  const lines = [`Group memory for ${formatGroupLabel(group)}:`];
+  const lines = [`Workspace memory for ${formatWorkspaceLabel(workspace)}:`];
 
   if (builtinMemories.length > 0) {
     lines.push("Builtin:");
     for (const memory of builtinMemories) {
-      const label = BUILTIN_GROUP_MEMORY_LABELS[memory.key] ?? memory.key;
+      const label = BUILTIN_WORKSPACE_MEMORY_LABELS[memory.key] ?? memory.key;
       lines.push(`- ${label} (${memory.key}): ${memory.value}`);
     }
   }
@@ -186,31 +237,28 @@ function formatGroupMemoryList(
   return lines.join("\n");
 }
 
-export function createGroupToolDefs(
-  groupFolder: string,
-  isMain: boolean,
+export function createWorkspaceToolDefs(
+  context: WorkspaceToolContext,
   db: Database,
   sender: MessageSender,
   projectRoot?: string,
 ): ToolDefinition[] {
-  log.info(TAG, `Creating tool definitions for group: ${groupFolder}`, {
-    isMain,
-    toolSet: isMain ? "main (full)" : "regular (limited)",
-  });
-
   const root = projectRoot ?? ".";
+  log.info(TAG, `Creating tool definitions for workspace: ${context.workspaceFolder}`, {
+    isMain: context.isMain,
+  });
 
   const commonTools: ToolDefinition[] = [
     {
       name: "send_message",
       description:
-        "Send a message to a chat group. Supports plain text, local Markdown images like ![alt](path.png), and local Markdown file links like [report.pdf](./report.pdf).",
+        "Send a message to a chat. Supports plain text, local Markdown images like ![alt](path.png), and local Markdown file links like [report.pdf](./report.pdf).",
       schema: {
         type: "object",
         properties: {
-          chatJid: {
+          externalChatId: {
             type: "string",
-            description: "Optional target chat ID. Omit it to send back to the current group.",
+            description: "Optional target external chat ID. Omit to reply to the current chat.",
           },
           text: {
             type: "string",
@@ -221,84 +269,70 @@ export function createGroupToolDefs(
         required: ["text"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetChatJid(db, groupFolder, isMain, args.chatJid);
-        log.info(TAG, `[send_message] called by group ${groupFolder}`, {
-          requestedChatJid: args.chatJid,
-          resolvedChatJid: resolvedTarget.ok ? resolvedTarget.chatJid : null,
-          textLength: (args.text as string).length,
-          textPreview: (args.text as string).substring(0, 100),
-        });
-        if (!resolvedTarget.ok) {
-          log.warn(TAG, `[send_message] Rejected target chat`, {
-            groupFolder,
-            requestedChatJid: args.chatJid,
-            message: resolvedTarget.message,
-          });
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        const resolvedTarget = resolveTargetExternalChatId(
+          db,
+          context,
+          args.externalChatId,
+        );
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
-        await sender.send(resolvedTarget.chatJid, args.text as string);
-        log.info(TAG, `[send_message] Message sent successfully`);
-        return { content: [{ type: "text", text: "Message sent" }] };
+
+        await sender.send(resolvedTarget.externalChatId, args.text as string);
+        return textResult("Message sent");
       },
     },
     {
       name: "send_image",
-      description: "Send an image file to a chat group",
+      description: "Send an image file to a chat",
       schema: {
         type: "object",
         properties: {
-          chatJid: {
+          externalChatId: {
             type: "string",
-            description: "Optional target chat ID. Omit it to send back to the current group.",
+            description: "Optional target external chat ID. Omit to reply to the current chat.",
           },
-          filePath: { type: "string", description: "Image file path, relative to current group working directory" },
+          filePath: {
+            type: "string",
+            description: "Image file path, relative to the current workspace directory",
+          },
         },
         required: ["filePath"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetChatJid(db, groupFolder, isMain, args.chatJid);
-        log.info(TAG, `[send_image] called by group ${groupFolder}`, {
-          requestedChatJid: args.chatJid,
-          resolvedChatJid: resolvedTarget.ok ? resolvedTarget.chatJid : null,
-          filePath: args.filePath,
-        });
-        if (!resolvedTarget.ok) {
-          log.warn(TAG, `[send_image] Rejected target chat`, {
-            groupFolder,
-            requestedChatJid: args.chatJid,
-            message: resolvedTarget.message,
-          });
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        const resolvedTarget = resolveTargetExternalChatId(
+          db,
+          context,
+          args.externalChatId,
+        );
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
 
-        const groupWorkdir = getWorkspaceDirectory(groupFolder, { rootDir: root });
-        const absoluteFilePath = resolve(groupWorkdir, args.filePath as string);
-        const rel = relative(groupWorkdir, absoluteFilePath);
+        const workspaceDir = getWorkspaceDirectory(context.workspaceFolder, { rootDir: root });
+        const absoluteFilePath = resolve(workspaceDir, args.filePath as string);
+        const rel = relative(workspaceDir, absoluteFilePath);
         const escaped = rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../");
         if (escaped) {
-          log.warn(TAG, `[send_image] Rejected path outside group workdir`, { groupFolder, filePath: args.filePath, absoluteFilePath });
-          return { content: [{ type: "text", text: "Invalid filePath: must stay within current group directory" }] };
+          return textResult("Invalid filePath: must stay within current workspace directory");
         }
 
         if (!existsSync(absoluteFilePath)) {
-          return { content: [{ type: "text", text: `File not found: ${args.filePath}` }] };
-        }
-        const stat = statSync(absoluteFilePath);
-        if (!stat.isFile()) {
-          return { content: [{ type: "text", text: `Not a file: ${args.filePath}` }] };
+          return textResult(`File not found: ${args.filePath}`);
         }
 
-        await sender.sendImage(resolvedTarget.chatJid, absoluteFilePath);
-        log.info(TAG, `[send_image] Image sent successfully`, {
-          chatJid: resolvedTarget.chatJid,
-          filePath: absoluteFilePath,
-        });
-        return { content: [{ type: "text", text: "Image sent" }] };
+        const stat = statSync(absoluteFilePath);
+        if (!stat.isFile()) {
+          return textResult(`Not a file: ${args.filePath}`);
+        }
+
+        await sender.sendImage(resolvedTarget.externalChatId, absoluteFilePath);
+        return textResult("Image sent");
       },
     },
     {
       name: "generate_image",
-      description: "Generate an image from a text prompt using MiniMax and save it into the current group directory",
+      description: "Generate an image from a text prompt using MiniMax and save it into the current workspace directory",
       schema: {
         type: "object",
         properties: {
@@ -333,19 +367,13 @@ export function createGroupToolDefs(
           ? (requestedAspectRatio as (typeof MINIMAX_IMAGE_ASPECT_RATIOS)[number])
           : "1:1";
 
-        log.info(TAG, `[generate_image] called by group ${groupFolder}`, {
-          model,
-          aspectRatio,
-          promptLength: prompt.length,
-        });
-
         if (!prompt) {
-          return { content: [{ type: "text", text: "Prompt is required for image generation." }] };
+          return textResult("Prompt is required for image generation.");
         }
 
         try {
           const artifact = await generateMiniMaxImage({
-            groupWorkdir: getWorkspaceDirectory(groupFolder, { rootDir: root }),
+            groupWorkdir: getWorkspaceDirectory(context.workspaceFolder, { rootDir: root }),
             prompt,
             model,
             aspectRatio,
@@ -354,7 +382,7 @@ export function createGroupToolDefs(
           return {
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text: JSON.stringify(
                   {
                     ok: true,
@@ -362,7 +390,7 @@ export function createGroupToolDefs(
                     aspectRatio: artifact.aspectRatio,
                     filePath: artifact.relativeFilePath,
                     message:
-                      "Image generated successfully. Use send_image with this filePath to post it to the group.",
+                      "Image generated successfully. Use send_image with this filePath to post it to the chat.",
                   },
                   null,
                   2,
@@ -371,61 +399,56 @@ export function createGroupToolDefs(
             ],
           };
         } catch (err) {
-          log.error(TAG, `[generate_image] failed for group ${groupFolder}`, err);
           const message = err instanceof Error ? err.message : String(err);
-          return { content: [{ type: "text", text: `Failed to generate image: ${message}` }] };
+          return textResult(`Failed to generate image: ${message}`);
         }
       },
     },
     {
       name: "schedule_task",
-      description: "Create a scheduled task",
+      description: "Create a scheduled task for the current workspace",
       schema: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Task prompt" },
           scheduleType: { type: "string", enum: ["cron"], description: "Schedule type" },
           scheduleValue: { type: "string", description: "Cron expression" },
-          contextMode: { type: "string", enum: ["group", "isolated"], default: "isolated", description: "Context mode" },
+          contextMode: {
+            type: "string",
+            enum: ["workspace", "isolated"],
+            default: "isolated",
+            description: "Context mode",
+          },
         },
         required: ["prompt", "scheduleType", "scheduleValue"],
       },
       handler: async (args) => {
-        log.info(TAG, `[schedule_task] called by group ${groupFolder}`, args);
-        const group = getGroupByFolder(db, groupFolder);
-        if (!group) {
-          log.error(TAG, `[schedule_task] Group not found: ${groupFolder}`);
-          return { content: [{ type: "text", text: "Group not found" }] };
-        }
         let nextRun: string | null = null;
         try {
           nextRun = computeNextRun(args.scheduleValue as string);
-        } catch (err) {
-          log.error(TAG, `[schedule_task] Invalid cron expression: ${args.scheduleValue}`, err);
-          return { content: [{ type: "text", text: `Invalid cron expression: ${args.scheduleValue}` }] };
+        } catch {
+          return textResult(`Invalid cron expression: ${args.scheduleValue}`);
         }
+
         const id = createTask(db, {
-          groupFolder,
-          chatJid: group.jid,
+          workspaceId: context.workspaceId,
+          chatId: context.chatId,
           prompt: args.prompt as string,
           scheduleType: args.scheduleType as string,
           scheduleValue: args.scheduleValue as string,
           contextMode: (args.contextMode as string) ?? "isolated",
           nextRun: nextRun ?? undefined,
         });
-        log.info(TAG, `[schedule_task] Task created: ${id}, nextRun: ${nextRun}`);
-        return { content: [{ type: "text", text: `Task created: ${id}, next run: ${nextRun}` }] };
+        return textResult(`Task created: ${id}, next run: ${nextRun}`);
       },
     },
     {
       name: "list_tasks",
-      description: "List scheduled tasks for the current group",
+      description: "List scheduled tasks for the current workspace",
       schema: { type: "object", properties: {}, required: [] },
       handler: async () => {
-        log.info(TAG, `[list_tasks] called by group ${groupFolder}`);
-        const tasks = listTasks(db, groupFolder);
-        log.debug(TAG, `[list_tasks] Found ${tasks.length} tasks`, tasks);
-        return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
+        const tasks = listTasks(db, context.workspaceId);
+        return textResult(JSON.stringify(tasks, null, 2));
       },
     },
     {
@@ -433,9 +456,8 @@ export function createGroupToolDefs(
       description: "Pause a scheduled task",
       schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
       handler: async (args) => {
-        log.info(TAG, `[pause_task] called by group ${groupFolder}`, args);
-        updateTaskStatus(db, args.taskId as string, groupFolder, "paused");
-        return { content: [{ type: "text", text: "Task paused" }] };
+        updateTaskStatus(db, args.taskId as string, context.workspaceId, "paused");
+        return textResult("Task paused");
       },
     },
     {
@@ -443,9 +465,8 @@ export function createGroupToolDefs(
       description: "Resume a paused task",
       schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
       handler: async (args) => {
-        log.info(TAG, `[resume_task] called by group ${groupFolder}`, args);
-        updateTaskStatus(db, args.taskId as string, groupFolder, "active");
-        return { content: [{ type: "text", text: "Task resumed" }] };
+        updateTaskStatus(db, args.taskId as string, context.workspaceId, "active");
+        return textResult("Task resumed");
       },
     },
     {
@@ -453,55 +474,63 @@ export function createGroupToolDefs(
       description: "Cancel a scheduled task",
       schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
       handler: async (args) => {
-        log.info(TAG, `[cancel_task] called by group ${groupFolder}`, args);
-        updateTaskStatus(db, args.taskId as string, groupFolder, "cancelled");
-        return { content: [{ type: "text", text: "Task cancelled" }] };
+        updateTaskStatus(db, args.taskId as string, context.workspaceId, "cancelled");
+        return textResult("Task cancelled");
       },
     },
     {
-      name: "remember_group_memory",
-      description: "Create or update long-term group memory. When the user expresses something the AI should remember, prefer mapping it to a builtin key first, and only create a custom key if no builtin key fits.",
+      name: "remember_workspace_memory",
+      description: "Create or update long-term workspace memory.",
       schema: {
         type: "object",
         properties: {
-          key: { type: "string", description: `Memory key. Prefer builtin keys first: ${BUILTIN_GROUP_MEMORY_KEYS.join(", ")}. Only use a custom key when builtin keys cannot express the memory.` },
+          key: {
+            type: "string",
+            description: `Memory key. Prefer builtin keys first: ${BUILTIN_WORKSPACE_MEMORY_KEYS.join(", ")}.`,
+          },
           value: { type: "string", description: "Memory value" },
-          keyType: { type: "string", enum: ["builtin", "custom"], default: "builtin", description: "Choose builtin whenever possible. Use custom only when no builtin key fits." },
-          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+          keyType: {
+            type: "string",
+            enum: ["builtin", "custom"],
+            default: "builtin",
+          },
+          targetWorkspaceFolder: {
+            type: "string",
+            description: "Optional target workspace folder. Main workspace only.",
+          },
         },
         required: ["key", "value"],
       },
       handler: async (args) => {
-        log.info(TAG, `[remember_group_memory] called by group ${groupFolder}`, args);
-        const resolvedTarget = resolveTargetGroup(
+        const resolvedTarget = resolveTargetWorkspace(
           db,
-          groupFolder,
-          isMain,
-          args.targetGroupFolder,
+          context,
+          args.targetWorkspaceFolder,
         );
-        if (!resolvedTarget.ok) {
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
 
         const key = typeof args.key === "string" ? args.key.trim() : "";
         const value = typeof args.value === "string" ? args.value.trim() : "";
-        const keyType: GroupMemoryKeyType =
+        const keyType: WorkspaceMemoryKeyType =
           args.keyType === "custom" ? "custom" : "builtin";
 
         if (!key) {
-          return { content: [{ type: "text", text: "Memory key is required." }] };
+          return textResult("Memory key is required.");
         }
+
         if (!value) {
-          return { content: [{ type: "text", text: "Memory value is required." }] };
+          return textResult("Memory value is required.");
         }
 
-        const validationError = validateGroupMemoryKey(key, keyType);
+        const validationError = validateWorkspaceMemoryKey(key, keyType);
         if (validationError) {
-          return { content: [{ type: "text", text: validationError }] };
+          return textResult(validationError);
         }
 
-        upsertGroupMemory(db, {
-          groupFolder: resolvedTarget.group.folder,
+        upsertWorkspaceMemory(db, {
+          workspaceId: resolvedTarget.workspace.id,
           key,
           keyType,
           value,
@@ -511,128 +540,132 @@ export function createGroupToolDefs(
         return {
           content: [
             {
-              type: "text",
-              text: `Saved group memory for ${formatGroupLabel(resolvedTarget.group)}: ${key} = ${value}`,
+              type: "text" as const,
+              text: `Saved workspace memory for ${formatWorkspaceLabel(resolvedTarget.workspace)}: ${key} = ${value}`,
             },
           ],
         };
       },
     },
     {
-      name: "list_group_memory",
-      description: "List long-term group memory for the current group or, from the main group, another group",
+      name: "list_workspace_memory",
+      description: "List long-term workspace memory.",
       schema: {
         type: "object",
         properties: {
-          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+          targetWorkspaceFolder: {
+            type: "string",
+            description: "Optional target workspace folder. Main workspace only.",
+          },
         },
         required: [],
       },
       handler: async (args) => {
-        log.info(TAG, `[list_group_memory] called by group ${groupFolder}`, args);
-        const resolvedTarget = resolveTargetGroup(
+        const resolvedTarget = resolveTargetWorkspace(
           db,
-          groupFolder,
-          isMain,
-          args.targetGroupFolder,
+          context,
+          args.targetWorkspaceFolder,
         );
-        if (!resolvedTarget.ok) {
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
 
-        const memories = listGroupMemories(db, resolvedTarget.group.folder);
+        const memories = listWorkspaceMemories(db, resolvedTarget.workspace.id);
         return {
           content: [
             {
-              type: "text",
-              text: formatGroupMemoryList(resolvedTarget.group, memories),
+              type: "text" as const,
+              text: formatWorkspaceMemoryList(resolvedTarget.workspace, memories),
             },
           ],
         };
       },
     },
     {
-      name: "forget_group_memory",
-      description: "Delete one long-term memory item from the current group or, from the main group, another group",
+      name: "forget_workspace_memory",
+      description: "Delete one long-term workspace memory item.",
       schema: {
         type: "object",
         properties: {
           key: { type: "string", description: "Memory key to delete" },
-          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+          targetWorkspaceFolder: {
+            type: "string",
+            description: "Optional target workspace folder. Main workspace only.",
+          },
         },
         required: ["key"],
       },
       handler: async (args) => {
-        log.info(TAG, `[forget_group_memory] called by group ${groupFolder}`, args);
-        const resolvedTarget = resolveTargetGroup(
+        const resolvedTarget = resolveTargetWorkspace(
           db,
-          groupFolder,
-          isMain,
-          args.targetGroupFolder,
+          context,
+          args.targetWorkspaceFolder,
         );
-        if (!resolvedTarget.ok) {
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
 
         const key = typeof args.key === "string" ? args.key.trim() : "";
         if (!key) {
-          return { content: [{ type: "text", text: "Memory key is required." }] };
+          return textResult("Memory key is required.");
         }
-        if (!isSupportedGroupMemoryKey(key)) {
+
+        if (!isSupportedWorkspaceMemoryKey(key)) {
           return {
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text: `Invalid memory key: ${key}. Use a builtin key or lowercase letters and underscores for custom keys.`,
               },
             ],
           };
         }
 
-        const deleted = deleteGroupMemory(db, resolvedTarget.group.folder, key);
+        const deleted = deleteWorkspaceMemory(db, resolvedTarget.workspace.id, key);
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: deleted
-                ? `Deleted group memory "${key}" from ${formatGroupLabel(resolvedTarget.group)}.`
-                : `Memory key not found for ${formatGroupLabel(resolvedTarget.group)}: ${key}`,
+                ? `Deleted workspace memory "${key}" from ${formatWorkspaceLabel(resolvedTarget.workspace)}.`
+                : `Memory key not found for ${formatWorkspaceLabel(resolvedTarget.workspace)}: ${key}`,
             },
           ],
         };
       },
     },
     {
-      name: "clear_group_memory",
-      description: "Clear all long-term memory for the current group or, from the main group, another group",
+      name: "clear_workspace_memory",
+      description: "Clear all long-term memory for a workspace.",
       schema: {
         type: "object",
         properties: {
-          targetGroupFolder: { type: "string", description: "Optional target group folder. Main group only." },
+          targetWorkspaceFolder: {
+            type: "string",
+            description: "Optional target workspace folder. Main workspace only.",
+          },
         },
         required: [],
       },
       handler: async (args) => {
-        log.info(TAG, `[clear_group_memory] called by group ${groupFolder}`, args);
-        const resolvedTarget = resolveTargetGroup(
+        const resolvedTarget = resolveTargetWorkspace(
           db,
-          groupFolder,
-          isMain,
-          args.targetGroupFolder,
+          context,
+          args.targetWorkspaceFolder,
         );
-        if (!resolvedTarget.ok) {
-          return { content: [{ type: "text", text: resolvedTarget.message }] };
+        if (resolvedTarget.ok === false) {
+          return textResult(resolvedTarget.message);
         }
 
-        const clearedCount = clearGroupMemories(db, resolvedTarget.group.folder);
+        const clearedCount = clearWorkspaceMemories(db, resolvedTarget.workspace.id);
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text:
                 clearedCount > 0
-                  ? `Cleared ${clearedCount} group memory item(s) for ${formatGroupLabel(resolvedTarget.group)}.`
-                  : `No group memory to clear for ${formatGroupLabel(resolvedTarget.group)}.`,
+                  ? `Cleared ${clearedCount} workspace memory item(s) for ${formatWorkspaceLabel(resolvedTarget.workspace)}.`
+                  : `No workspace memory to clear for ${formatWorkspaceLabel(resolvedTarget.workspace)}.`,
             },
           ],
         };
@@ -640,154 +673,146 @@ export function createGroupToolDefs(
     },
     {
       name: "list_curated_skills",
-      description: "List available curated skills that can be installed into this group",
+      description: "List available curated skills that can be installed into this workspace",
       schema: { type: "object", properties: {}, required: [] },
       handler: async () => {
-        log.info(TAG, `[list_curated_skills] called by group ${groupFolder}`);
         const curatedDir = join(root, "skills", "curated");
         if (!existsSync(curatedDir)) {
-          return { content: [{ type: "text", text: "No curated skills available" }] };
+          return textResult("No curated skills available");
         }
+
         const skills: Array<{ name: string; description: string; installed: boolean }> = [];
         for (const name of readdirSync(curatedDir)) {
           const skillDir = join(curatedDir, name);
           const skillMd = join(skillDir, "SKILL.md");
-          if (!existsSync(skillMd)) continue;
+          if (!existsSync(skillMd)) {
+            continue;
+          }
+
           const content = readFileSync(skillMd, "utf-8");
           let description = "";
           const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
           if (fmMatch?.[1]) {
             const descMatch = fmMatch[1].match(/description:\s*(.+)/);
-            if (descMatch?.[1]) description = descMatch[1].trim();
+            if (descMatch?.[1]) {
+              description = descMatch[1].trim();
+            }
           }
+
           const installed = existsSync(
-            join(getWorkspaceDirectory(groupFolder, { rootDir: root }), ".pi", "skills", name, "SKILL.md"),
+            join(
+              getWorkspaceDirectory(context.workspaceFolder, { rootDir: root }),
+              ".pi",
+              "skills",
+              name,
+              "SKILL.md",
+            ),
           );
           skills.push({ name, description, installed });
         }
-        log.debug(TAG, `[list_curated_skills] Found ${skills.length} curated skills`, skills);
-        return { content: [{ type: "text", text: JSON.stringify(skills, null, 2) }] };
+
+        return textResult(JSON.stringify(skills, null, 2));
       },
     },
     {
       name: "install_curated_skill",
-      description: "Install a curated skill into this group so it becomes available for use",
+      description: "Install a curated skill into this workspace",
       schema: {
         type: "object",
-        properties: { skillName: { type: "string", description: "Name of the curated skill to install" } },
+        properties: {
+          skillName: { type: "string", description: "Name of the curated skill to install" },
+        },
         required: ["skillName"],
       },
       handler: async (args) => {
-        log.info(TAG, `[install_curated_skill] called by group ${groupFolder}`, args);
         const src = join(root, "skills", "curated", args.skillName as string);
         if (!existsSync(src) || !existsSync(join(src, "SKILL.md"))) {
-          log.warn(TAG, `[install_curated_skill] Skill not found: ${args.skillName}`);
-          return { content: [{ type: "text", text: `Skill not found: ${args.skillName}` }] };
+          return textResult(`Skill not found: ${args.skillName}`);
         }
+
         const dest = join(
-          getWorkspaceDirectory(groupFolder, { rootDir: root }),
+          getWorkspaceDirectory(context.workspaceFolder, { rootDir: root }),
           ".pi",
           "skills",
           args.skillName as string,
         );
         if (existsSync(join(dest, "SKILL.md"))) {
-          log.info(TAG, `[install_curated_skill] Already installed: ${args.skillName}`);
-          return { content: [{ type: "text", text: `Skill already installed: ${args.skillName}` }] };
+          return textResult(`Skill already installed: ${args.skillName}`);
         }
+
         copyDirRecursive(src, dest);
-        log.info(TAG, `[install_curated_skill] Installed ${args.skillName} → ${dest}`);
-        return { content: [{ type: "text", text: `Skill installed: ${args.skillName}` }] };
+        return textResult(`Skill installed: ${args.skillName}`);
       },
     },
   ];
 
-  const mainOnlyTools: ToolDefinition[] = isMain
+  const mainOnlyTools: ToolDefinition[] = context.isMain
     ? [
         {
-          name: "list_groups",
-          description: "List all registered groups",
+          name: "list_workspaces",
+          description: "List all workspaces",
           schema: { type: "object", properties: {}, required: [] },
           handler: async () => {
-            log.info(TAG, `[list_groups] called by main group`);
-            const groups = listGroups(db);
-            log.debug(TAG, `[list_groups] Found ${groups.length} groups`, groups);
-            return { content: [{ type: "text", text: JSON.stringify(groups, null, 2) }] };
+            return textResult(JSON.stringify(listWorkspaces(db), null, 2));
           },
         },
         {
-          name: "register_group",
-          description: "Register a new group",
+          name: "refresh_chats",
+          description: "Refresh chat metadata from all channels",
+          schema: { type: "object", properties: {}, required: [] },
+          handler: async () => {
+            const result = await sender.refreshChatMetadata();
+            return textResult(`Refreshed: ${result.count} chats found`);
+          },
+        },
+        {
+          name: "schedule_workspace_task",
+          description: "Create a scheduled task for another workspace",
           schema: {
             type: "object",
             properties: {
-              jid: { type: "string", description: "Group chat ID" },
-              name: { type: "string", description: "Group name" },
-              folder: { type: "string", description: "Working directory name" },
-              triggerPattern: { type: "string", description: "Trigger keyword" },
-            },
-            required: ["jid", "name", "folder", "triggerPattern"],
-          },
-          handler: async (args) => {
-            log.info(TAG, `[register_group] called by main group`, args);
-            registerGroup(db, {
-              ...(args as { jid: string; name: string; folder: string; triggerPattern: string }),
-              profileKey: loadAgentProfilesConfig().defaultProfile,
-            });
-            log.info(TAG, `[register_group] Group registered: ${args.jid}`);
-            return { content: [{ type: "text", text: "Group registered" }] };
-          },
-        },
-        {
-          name: "refresh_groups",
-          description: "Refresh group metadata from all channels",
-          schema: { type: "object", properties: {}, required: [] },
-          handler: async () => {
-            log.info(TAG, `[refresh_groups] called by main group`);
-            const result = await sender.refreshGroupMetadata();
-            log.info(TAG, `[refresh_groups] Refreshed: ${result.count} chats`);
-            return { content: [{ type: "text", text: `Refreshed: ${result.count} chats found` }] };
-          },
-        },
-        {
-          name: "cross_group_schedule_task",
-          description: "Create a scheduled task for another group",
-          schema: {
-            type: "object",
-            properties: {
-              targetGroupFolder: { type: "string", description: "Target group folder name" },
+              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
               prompt: { type: "string", description: "Task prompt" },
               scheduleType: { type: "string", enum: ["cron"] },
               scheduleValue: { type: "string", description: "Cron expression" },
-              contextMode: { type: "string", enum: ["group", "isolated"], default: "isolated" },
+              contextMode: { type: "string", enum: ["workspace", "isolated"], default: "isolated" },
             },
-            required: ["targetGroupFolder", "prompt", "scheduleType", "scheduleValue"],
+            required: ["targetWorkspaceFolder", "prompt", "scheduleType", "scheduleValue"],
           },
           handler: async (args) => {
-            log.info(TAG, `[cross_group_schedule_task] called by main group`, args);
-            const targetGroupFolder = args.targetGroupFolder as string;
-            const targetGroup = getGroupByFolder(db, targetGroupFolder);
-            if (!targetGroup) {
-              log.warn(TAG, `[cross_group_schedule_task] Target group not found: ${targetGroupFolder}`);
-              return { content: [{ type: "text", text: "Target group not found" }] };
+            const resolvedTarget = resolveTargetWorkspace(
+              db,
+              context,
+              args.targetWorkspaceFolder,
+            );
+            if (resolvedTarget.ok === false) {
+              return textResult(resolvedTarget.message);
             }
+
             let nextRun: string | null = null;
             try {
               nextRun = computeNextRun(args.scheduleValue as string);
-            } catch (err) {
-              log.error(TAG, `[cross_group_schedule_task] Invalid cron: ${args.scheduleValue}`, err);
-              return { content: [{ type: "text", text: `Invalid cron expression: ${args.scheduleValue}` }] };
+            } catch {
+              return textResult(`Invalid cron expression: ${args.scheduleValue}`);
             }
+
             const id = createTask(db, {
-              groupFolder: targetGroupFolder,
-              chatJid: targetGroup.jid,
+              workspaceId: resolvedTarget.workspace.id,
+              chatId: resolvedTarget.chatId,
               prompt: args.prompt as string,
               scheduleType: args.scheduleType as string,
               scheduleValue: args.scheduleValue as string,
               contextMode: (args.contextMode as string) ?? "isolated",
               nextRun: nextRun ?? undefined,
             });
-            log.info(TAG, `[cross_group_schedule_task] Task created: ${id} for ${targetGroupFolder}, nextRun: ${nextRun}`);
-            return { content: [{ type: "text", text: `Task created for ${targetGroupFolder}: ${id}, next run: ${nextRun}` }] };
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Task created for ${resolvedTarget.workspace.folder}: ${id}, next run: ${nextRun}`,
+                },
+              ],
+            };
           },
         },
         {
@@ -795,13 +820,12 @@ export function createGroupToolDefs(
           description: "List all configured agent profiles with model and upstream details",
           schema: { type: "object", properties: {}, required: [] },
           handler: async () => {
-            log.info(TAG, `[list_profiles] called by main group`);
             const config = loadAgentProfilesConfig();
             const profiles = listAgentProfiles();
             return {
               content: [
                 {
-                  type: "text",
+                  type: "text" as const,
                   text: JSON.stringify(
                     {
                       defaultProfile: config.defaultProfile,
@@ -817,42 +841,42 @@ export function createGroupToolDefs(
         },
         {
           name: "switch_profile",
-          description: "Switch the agent profile for a group. Use list_profiles to see available profile keys.",
+          description: "Switch the agent profile for a workspace. Use list_profiles to see available profile keys.",
           schema: {
             type: "object",
             properties: {
-              targetGroupFolder: { type: "string", description: "Target group folder name" },
-              profileKey: { type: "string", description: "Profile key (e.g. claude, codex, kimi, kimi-cli)" },
+              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
+              profileKey: { type: "string", description: "Profile key" },
             },
-            required: ["targetGroupFolder", "profileKey"],
+            required: ["targetWorkspaceFolder", "profileKey"],
           },
           handler: async (args) => {
-            const folder = args.targetGroupFolder as string;
+            const folder = args.targetWorkspaceFolder as string;
             const profileKey = args.profileKey as string;
-            log.info(TAG, `[switch_profile] called by main group`, { folder, profileKey });
-            const target = getGroupByFolder(db, folder);
-            if (!target) {
-              return { content: [{ type: "text", text: `Group not found: ${folder}` }] };
+            const targetWorkspace = getWorkspaceByFolder(db, folder);
+            if (!targetWorkspace) {
+              return textResult(`Workspace not found: ${folder}`);
             }
+
             const config = loadAgentProfilesConfig();
             if (!config.profiles[profileKey]) {
               const available = Object.keys(config.profiles).sort().join(", ");
               return {
                 content: [
                   {
-                    type: "text",
+                    type: "text" as const,
                     text: `Unknown profile: ${profileKey}. Available profiles: ${available}`,
                   },
                 ],
               };
             }
-            updateGroupProfile(db, folder, profileKey);
-            log.info(TAG, `[switch_profile] Switched ${folder} to profile: ${profileKey}`);
+
+            updateWorkspace(db, targetWorkspace.id, { profileKey });
             return {
               content: [
                 {
-                  type: "text",
-                  text: `Group "${target.name}" (${folder}) switched to profile: ${profileKey}`,
+                  type: "text" as const,
+                  text: `Workspace "${targetWorkspace.name}" (${folder}) switched to profile: ${profileKey}`,
                 },
               ],
             };
@@ -860,49 +884,30 @@ export function createGroupToolDefs(
         },
         {
           name: "clear_session",
-          description: "Clear only the AI session for a target group. This does not clear group memory, pending messages, or files.",
+          description: "Clear only the AI session for a target workspace.",
           schema: {
             type: "object",
             properties: {
-              targetGroupFolder: { type: "string", description: "Target group folder name" },
+              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
             },
-            required: ["targetGroupFolder"],
+            required: ["targetWorkspaceFolder"],
           },
           handler: async (args) =>
             handleClearSessionTool(
               db,
               sender,
-              args.targetGroupFolder as string,
+              args.targetWorkspaceFolder as string,
               "clear_session",
-            ),
-        },
-        {
-          name: "clear_context",
-          description:
-            "Compatibility alias for clear_session. This only clears the AI session for a target group.",
-          schema: {
-            type: "object",
-            properties: {
-              targetGroupFolder: { type: "string", description: "Target group folder name" },
-            },
-            required: ["targetGroupFolder"],
-          },
-          handler: async (args) =>
-            handleClearSessionTool(
-              db,
-              sender,
-              args.targetGroupFolder as string,
-              "clear_context",
             ),
         },
       ]
     : [];
 
   const allTools = [...commonTools, ...mainOnlyTools];
-  log.info(TAG, `Tool definitions created for group ${groupFolder}: ${allTools.length} tools`);
+  log.info(TAG, `Tool definitions created for workspace ${context.workspaceFolder}: ${allTools.length} tools`);
   return allTools;
 }
 
 export function getToolNames(tools: ToolDefinition[], mcpServerName: string): string[] {
-  return tools.map((t) => `mcp__${mcpServerName}__${t.name}`);
+  return tools.map((tool) => `mcp__${mcpServerName}__${tool.name}`);
 }

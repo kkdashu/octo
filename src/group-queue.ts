@@ -3,12 +3,12 @@ import type { ChannelManager } from "./channels/manager";
 import { resolvePersistedPiSessionRef } from "./providers/pi-session-ref";
 import { loadAgentProfilesConfig, resolveAgentProfile } from "./runtime/profile-config";
 import {
-  buildGroupMemoryPromptBlock,
+  buildWorkspaceMemoryPromptBlock,
   buildSessionInitialPrompt,
 } from "./runtime/group-memory-prompt";
 import {
   buildGroupExternalMcpServers,
-  isGroupSkillInstalled,
+  isWorkspaceSkillInstalled,
 } from "./runtime/group-external-mcp";
 import type {
   AgentRuntime,
@@ -17,16 +17,13 @@ import type {
   RuntimeEvent,
 } from "./providers/types";
 import {
-  getGroupByFolder,
   listChatBindingsForChat,
-  listGroupMemories,
+  listWorkspaceMemories,
   type ChatRow,
-  type GroupMemoryRow,
-  type RegisteredGroup,
   type WorkspaceRow,
 } from "./db";
 import { getWorkspaceDirectory } from "./group-workspace";
-import { createGroupToolDefs } from "./tools";
+import { createWorkspaceToolDefs } from "./tools";
 import type { MessageSender } from "./tools";
 import { log } from "./logger";
 import { WorkspaceService } from "./workspace-service";
@@ -41,7 +38,6 @@ type ActiveConversationState = {
 type ResolvedQueueTarget = {
   chat: ChatRow;
   workspace: WorkspaceRow;
-  group: RegisteredGroup | null;
   externalChatId: string;
 };
 
@@ -72,45 +68,31 @@ export class GroupQueue {
     return nextGeneration;
   }
 
-  private resolveTarget(chatOrGroupId: string): ResolvedQueueTarget {
-    const directChat = this.workspaceService.getChatById(chatOrGroupId);
+  private resolveTarget(chatOrWorkspaceId: string): ResolvedQueueTarget {
+    const directChat = this.workspaceService.getChatById(chatOrWorkspaceId);
     const chat = directChat ?? (() => {
-      const workspace = this.workspaceService.getWorkspaceById(chatOrGroupId)
-        ?? this.workspaceService.getWorkspaceByFolder(chatOrGroupId);
+      const workspace = this.workspaceService.getWorkspaceById(chatOrWorkspaceId)
+        ?? this.workspaceService.getWorkspaceByFolder(chatOrWorkspaceId);
       if (workspace) {
         return this.workspaceService.listChats(workspace.id)[0] ?? null;
       }
-
-      const group = getGroupByFolder(this.db, chatOrGroupId);
-      if (!group) {
-        return null;
-      }
-
-      const groupWorkspace = this.workspaceService.getWorkspaceByFolder(group.folder);
-      if (!groupWorkspace) {
-        return null;
-      }
-
-      return this.workspaceService.listChats(groupWorkspace.id)[0] ?? null;
+      return null;
     })();
 
     if (!chat) {
-      throw new Error(`Chat not found: ${chatOrGroupId}`);
+      throw new Error(`Chat not found: ${chatOrWorkspaceId}`);
     }
 
     const workspace = this.workspaceService.getWorkspaceById(chat.workspace_id);
     if (!workspace) {
       throw new Error(`Workspace not found: ${chat.workspace_id}`);
     }
-
-    const group = getGroupByFolder(this.db, workspace.folder);
     const binding = listChatBindingsForChat(this.db, chat.id)[0] ?? null;
 
     return {
       chat,
       workspace,
-      group,
-      externalChatId: binding?.external_chat_id ?? group?.jid ?? chat.id,
+      externalChatId: binding?.external_chat_id ?? chat.id,
     };
   }
 
@@ -122,13 +104,12 @@ export class GroupQueue {
   }
 
   private getRequestedProfileKey(target: ResolvedQueueTarget): string {
-    return target.group?.profile_key
-      || target.workspace.profile_key
+    return target.workspace.profile_key
       || loadAgentProfilesConfig().defaultProfile;
   }
 
   private getIsMain(target: ResolvedQueueTarget): boolean {
-    return (target.group?.is_main ?? target.workspace.is_main) === 1;
+    return target.workspace.is_main === 1;
   }
 
   private logIgnoredStaleEvent(
@@ -210,7 +191,7 @@ export class GroupQueue {
   ): Promise<void> {
     const target = this.resolveTarget(chatOrGroupId);
     const chatId = target.chat.id;
-    const groupFolder = target.workspace.folder;
+    const workspaceFolder = target.workspace.folder;
 
     if (this.activeTasks >= this.concurrencyLimit) {
       log.warn(TAG, `Concurrency limit reached (${this.activeTasks}/${this.concurrencyLimit}), waiting for slot: ${chatId}`);
@@ -234,18 +215,23 @@ export class GroupQueue {
       });
 
       const messageSender: MessageSender = {
-        send: (chatJid, text) => this.channelManager.send(chatJid, text),
-        sendImage: (chatJid, filePath) => this.channelManager.sendImage(chatJid, filePath),
-        refreshGroupMetadata: async () => {
+        send: (externalChatId, text) => this.channelManager.send(externalChatId, text),
+        sendImage: (externalChatId, filePath) => this.channelManager.sendImage(externalChatId, filePath),
+        refreshChatMetadata: async () => {
           const chats = await this.channelManager.refreshGroupMetadata();
           return { count: chats.length };
         },
-        clearSession: (folder) => this.clearSession(folder),
+        clearSession: (chatId) => this.clearSession(chatId),
       };
-      const tools = createGroupToolDefs(groupFolder, isMain, this.db, messageSender);
+      const tools = createWorkspaceToolDefs({
+        workspaceId: target.workspace.id,
+        workspaceFolder,
+        chatId,
+        isMain,
+      }, this.db, messageSender);
       let currentChat = this.workspaceService.getChatById(chatId) ?? target.chat;
       const persistedSessionRef = currentChat.session_ref;
-      const workingDirectory = getWorkspaceDirectory(groupFolder);
+      const workingDirectory = getWorkspaceDirectory(workspaceFolder);
       const resumeSessionRef = resolvePersistedPiSessionRef(
         workingDirectory,
         persistedSessionRef,
@@ -268,8 +254,8 @@ export class GroupQueue {
         willResume: !!resumeSessionRef,
       });
 
-      const memories = listGroupMemories(this.db, groupFolder);
-      const memoryBlock = buildGroupMemoryPromptBlock(memories);
+      const memories = listWorkspaceMemories(this.db, target.workspace.id);
+      const memoryBlock = buildWorkspaceMemoryPromptBlock(memories);
       const initialPromptWithMemory = buildSessionInitialPrompt(
         initialPrompt,
         memories,
@@ -284,13 +270,13 @@ export class GroupQueue {
       });
 
       const { conversation, events } = await this.runtime.openConversation({
-        groupFolder,
+        workspaceFolder,
         workingDirectory,
         isMain,
         resumeSessionRef,
         tools,
         profile,
-        externalMcpServers: buildGroupExternalMcpServers(groupFolder),
+        externalMcpServers: buildGroupExternalMcpServers(workspaceFolder),
       });
 
       if (sessionGeneration !== this.getSessionGeneration(chatId)) {
@@ -326,7 +312,7 @@ export class GroupQueue {
 
             if (event.type === "assistant_text") {
               log.info(TAG, `Sending agent reply to chat ${target.externalChatId}`, {
-                groupFolder,
+                workspaceFolder,
                 textPreview: event.text.substring(0, 200),
               });
               await this.channelManager.send(target.externalChatId, event.text);
@@ -412,7 +398,7 @@ export class GroupQueue {
   }> {
     const target = this.resolveTarget(chatOrGroupId);
     const chatId = target.chat.id;
-    const groupFolder = target.workspace.folder;
+    const workspaceFolder = target.workspace.folder;
 
     log.info(TAG, `Clearing session for chat: ${chatId}`);
 
@@ -430,7 +416,7 @@ export class GroupQueue {
 
     const requestedProfileKey = this.getRequestedProfileKey(target);
     const profile = resolveAgentProfile(requestedProfileKey);
-    const workingDirectory = getWorkspaceDirectory(groupFolder);
+    const workingDirectory = getWorkspaceDirectory(workspaceFolder);
     const persistedSessionRef = previousSessionRef;
     const resumeSessionRef = resolvePersistedPiSessionRef(
       workingDirectory,
@@ -458,7 +444,7 @@ export class GroupQueue {
     }
 
     const { sessionRef } = await this.runtime.resetSession({
-      groupFolder,
+      workspaceFolder,
       workingDirectory,
       profile,
       resumeSessionRef,
@@ -485,7 +471,7 @@ export class GroupQueue {
 
 export const __test__ = {
   buildGroupExternalMcpServers,
-  buildGroupMemoryPromptBlock,
+  buildWorkspaceMemoryPromptBlock,
   buildSessionInitialPrompt,
-  isGroupSkillInstalled,
+  isWorkspaceSkillInstalled,
 };

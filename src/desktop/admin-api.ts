@@ -1,32 +1,33 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import {
-  deleteGroupMemory,
-  getGroupByFolder,
-  listGroups,
-  listGroupMemories,
-  type RegisteredGroup,
-  type GroupMemoryRow,
-  upsertGroupMemory,
-  updateGroupMetadata,
-  validateGroupMemoryKey,
+  deleteWorkspaceMemory,
+  getWorkspaceByFolder,
+  listChatsForWorkspace,
+  listWorkspaceMemories,
+  listWorkspaces,
+  type WorkspaceMemoryRow,
+  upsertWorkspaceMemory,
+  updateChat,
+  updateWorkspace,
+  validateWorkspaceMemoryKey,
 } from "../db";
 import { listAgentProfiles, loadAgentProfilesConfig } from "../runtime/profile-config";
 import {
-  createGroupDirectory,
+  createWorkspaceDirectory,
   DesktopAdminFileError,
-  listGroupDirectory,
-  readGroupTextFile,
-  writeGroupTextFile,
+  listWorkspaceDirectory,
+  readWorkspaceTextFile,
+  writeWorkspaceTextFile,
 } from "./admin-files";
 import type {
   DesktopAdminDirectoryListingDto,
   DesktopAdminFileContentDto,
-  DesktopAdminGroupDetailResponse,
-  DesktopAdminGroupDto,
-  DesktopAdminGroupListResponse,
-  DesktopAdminGroupMemoryDto,
   DesktopAdminProfileOption,
+  DesktopAdminWorkspaceDetailResponse,
+  DesktopAdminWorkspaceDto,
+  DesktopAdminWorkspaceListResponse,
+  DesktopAdminWorkspaceMemoryDto,
 } from "./admin-types";
 
 type RouteRequest = Request & {
@@ -34,9 +35,9 @@ type RouteRequest = Request & {
 };
 
 export interface DesktopAdminApiRouter {
-  listGroups(req: Request): Response;
-  getGroup(req: Request): Response;
-  patchGroup(req: Request): Promise<Response>;
+  listWorkspaces(req: Request): Response;
+  getWorkspace(req: Request): Response;
+  patchWorkspace(req: Request): Promise<Response>;
   putMemory(req: Request): Promise<Response>;
   deleteMemory(req: Request): Response;
   listFiles(req: Request): Response;
@@ -46,8 +47,8 @@ export interface DesktopAdminApiRouter {
   postFolder(req: Request): Promise<Response>;
 }
 
-const patchGroupSchema = z.object({
-  name: z.string().trim().min(1, "群名称不能为空"),
+const patchWorkspaceSchema = z.object({
+  name: z.string().trim().min(1, "workspace 名称不能为空"),
   triggerPattern: z.string(),
   requiresTrigger: z.boolean(),
   profileKey: z.string().trim().min(1, "模型线路不能为空"),
@@ -117,21 +118,28 @@ function toDesktopAdminProfileOption(): DesktopAdminProfileOption[] {
     .sort((a, b) => a.profileKey.localeCompare(b.profileKey));
 }
 
-function toDesktopAdminGroupDto(group: RegisteredGroup): DesktopAdminGroupDto {
+function mapWorkspaceRow(db: Database, folder: string): DesktopAdminWorkspaceDto {
+  const workspace = getWorkspaceByFolder(db, folder);
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${folder}`);
+  }
+
+  const chat = listChatsForWorkspace(db, workspace.id)[0] ?? null;
   return {
-    jid: group.jid,
-    name: group.name,
-    folder: group.folder,
-    channelType: group.channel_type,
-    triggerPattern: group.trigger_pattern,
-    requiresTrigger: group.requires_trigger === 1,
-    isMain: group.is_main === 1,
-    profileKey: group.profile_key,
-    addedAt: group.added_at,
+    id: workspace.id,
+    name: workspace.name,
+    folder: workspace.folder,
+    triggerPattern: chat?.trigger_pattern ?? "",
+    requiresTrigger: chat?.requires_trigger === 1,
+    isMain: workspace.is_main === 1,
+    profileKey: workspace.profile_key,
+    createdAt: workspace.created_at,
   };
 }
 
-function toDesktopAdminGroupMemoryDto(memory: GroupMemoryRow): DesktopAdminGroupMemoryDto {
+function toDesktopAdminWorkspaceMemoryDto(
+  memory: WorkspaceMemoryRow,
+): DesktopAdminWorkspaceMemoryDto {
   return {
     key: memory.key,
     keyType: memory.key_type,
@@ -142,9 +150,9 @@ function toDesktopAdminGroupMemoryDto(memory: GroupMemoryRow): DesktopAdminGroup
   };
 }
 
-function buildGroupListResponse(db: Database): DesktopAdminGroupListResponse {
-  const groups = listGroups(db)
-    .map(toDesktopAdminGroupDto)
+function buildWorkspaceListResponse(db: Database): DesktopAdminWorkspaceListResponse {
+  const workspaces = listWorkspaces(db)
+    .map((workspace) => mapWorkspaceRow(db, workspace.folder))
     .sort((a, b) => {
       if (a.isMain !== b.isMain) {
         return a.isMain ? -1 : 1;
@@ -154,24 +162,24 @@ function buildGroupListResponse(db: Database): DesktopAdminGroupListResponse {
     });
 
   return {
-    groups,
+    workspaces,
     availableProfiles: toDesktopAdminProfileOption(),
   };
 }
 
-function buildGroupDetailResponse(
+function buildWorkspaceDetailResponse(
   db: Database,
   folder: string,
-): DesktopAdminGroupDetailResponse | null {
-  const group = getGroupByFolder(db, folder);
-  if (!group) {
+): DesktopAdminWorkspaceDetailResponse | null {
+  const workspace = getWorkspaceByFolder(db, folder);
+  if (!workspace) {
     return null;
   }
 
   return {
-    group: toDesktopAdminGroupDto(group),
+    workspace: mapWorkspaceRow(db, folder),
     availableProfiles: toDesktopAdminProfileOption(),
-    memories: listGroupMemories(db, folder).map(toDesktopAdminGroupMemoryDto),
+    memories: listWorkspaceMemories(db, workspace.id).map(toDesktopAdminWorkspaceMemoryDto),
   };
 }
 
@@ -199,16 +207,16 @@ export function createDesktopAdminApiRouter(
   const rootDir = options?.rootDir ?? process.cwd();
 
   return {
-    listGroups() {
-      return json(buildGroupListResponse(db));
+    listWorkspaces() {
+      return json(buildWorkspaceListResponse(db));
     },
 
-    getGroup(req) {
+    getWorkspace(req) {
       try {
         const folder = getFolderParam(req);
-        const response = buildGroupDetailResponse(db, folder);
+        const response = buildWorkspaceDetailResponse(db, folder);
         if (!response) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
         return json(response);
@@ -217,15 +225,15 @@ export function createDesktopAdminApiRouter(
       }
     },
 
-    async patchGroup(req) {
+    async patchWorkspace(req) {
       try {
         const folder = getFolderParam(req);
-        const target = getGroupByFolder(db, folder);
-        if (!target) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+        const workspace = getWorkspaceByFolder(db, folder);
+        if (!workspace) {
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
-        const body = patchGroupSchema.parse(await req.json());
+        const body = patchWorkspaceSchema.parse(await req.json());
         const config = loadAgentProfilesConfig();
         if (!config.profiles[body.profileKey]) {
           return errorResponse(
@@ -235,10 +243,22 @@ export function createDesktopAdminApiRouter(
           );
         }
 
-        updateGroupMetadata(db, folder, body);
-        const response = buildGroupDetailResponse(db, folder);
+        updateWorkspace(db, workspace.id, {
+          name: body.name,
+          profileKey: body.profileKey,
+        });
+        const chat = listChatsForWorkspace(db, workspace.id)[0] ?? null;
+        if (chat) {
+          updateChat(db, chat.id, {
+            title: body.name,
+            triggerPattern: body.triggerPattern,
+            requiresTrigger: body.requiresTrigger,
+          });
+        }
+
+        const response = buildWorkspaceDetailResponse(db, folder);
         if (!response) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
         return json(response);
@@ -250,28 +270,26 @@ export function createDesktopAdminApiRouter(
     async putMemory(req) {
       try {
         const folder = getFolderParam(req);
-        const target = getGroupByFolder(db, folder);
-        if (!target) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+        const workspace = getWorkspaceByFolder(db, folder);
+        if (!workspace) {
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
         const body = upsertMemorySchema.parse(await req.json());
-        const validationError = validateGroupMemoryKey(body.key, body.keyType);
+        const validationError = validateWorkspaceMemoryKey(body.key, body.keyType);
         if (validationError) {
-          return errorResponse(400, "invalid_request", validationError);
+          return errorResponse(400, "invalid_memory_key", validationError);
         }
 
-        upsertGroupMemory(db, {
-          groupFolder: folder,
+        upsertWorkspaceMemory(db, {
+          workspaceId: workspace.id,
           key: body.key,
           keyType: body.keyType,
           value: body.value,
-          source: "tool",
         });
-
-        const response = buildGroupDetailResponse(db, folder);
+        const response = buildWorkspaceDetailResponse(db, folder);
         if (!response) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
         return json(response);
@@ -283,9 +301,9 @@ export function createDesktopAdminApiRouter(
     deleteMemory(req) {
       try {
         const folder = getFolderParam(req);
-        const target = getGroupByFolder(db, folder);
-        if (!target) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
+        const workspace = getWorkspaceByFolder(db, folder);
+        if (!workspace) {
+          return errorResponse(404, "workspace_not_found", `Workspace not found: ${folder}`);
         }
 
         const key = parseKeyQuery(req);
@@ -293,17 +311,12 @@ export function createDesktopAdminApiRouter(
           return errorResponse(400, "invalid_request", "memory key 不能为空");
         }
 
-        const deleted = deleteGroupMemory(db, folder, key);
+        const deleted = deleteWorkspaceMemory(db, workspace.id, key);
         if (!deleted) {
           return errorResponse(404, "memory_not_found", `Memory not found: ${key}`);
         }
 
-        const response = buildGroupDetailResponse(db, folder);
-        if (!response) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
-        return json(response);
+        return json({ ok: true });
       } catch (error) {
         return handleKnownError(error);
       }
@@ -312,13 +325,7 @@ export function createDesktopAdminApiRouter(
     listFiles(req) {
       try {
         const folder = getFolderParam(req);
-        if (!getGroupByFolder(db, folder)) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
-        const path = parsePathQuery(req);
-        const response: DesktopAdminDirectoryListingDto = listGroupDirectory(folder, path, rootDir);
-        return json(response);
+        return json(listWorkspaceDirectory(folder, parsePathQuery(req), rootDir));
       } catch (error) {
         return handleKnownError(error);
       }
@@ -327,13 +334,11 @@ export function createDesktopAdminApiRouter(
     getFile(req) {
       try {
         const folder = getFolderParam(req);
-        if (!getGroupByFolder(db, folder)) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
         const path = parsePathQuery(req);
-        const response: DesktopAdminFileContentDto = readGroupTextFile(folder, path, rootDir);
-        return json(response);
+        if (path === ".") {
+          return errorResponse(400, "invalid_request", "文件路径不能为空");
+        }
+        return json(readWorkspaceTextFile(folder, path, rootDir));
       } catch (error) {
         return handleKnownError(error);
       }
@@ -342,16 +347,11 @@ export function createDesktopAdminApiRouter(
     async putFile(req) {
       try {
         const folder = getFolderParam(req);
-        if (!getGroupByFolder(db, folder)) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
         const body = updateFileSchema.parse(await req.json());
-        const response = writeGroupTextFile(folder, body.path, body.content, {
+        return json(writeWorkspaceTextFile(folder, body.path, body.content, {
           overwrite: true,
           rootDir,
-        });
-        return json(response);
+        }));
       } catch (error) {
         return handleKnownError(error);
       }
@@ -360,17 +360,12 @@ export function createDesktopAdminApiRouter(
     async postFile(req) {
       try {
         const folder = getFolderParam(req);
-        if (!getGroupByFolder(db, folder)) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
         const body = createFileSchema.parse(await req.json());
-        const response = writeGroupTextFile(folder, body.path, body.content, {
-          createParents: body.createParents ?? false,
+        return json(writeWorkspaceTextFile(folder, body.path, body.content, {
+          createParents: body.createParents,
           overwrite: false,
           rootDir,
-        });
-        return json(response, 201);
+        }), 201);
       } catch (error) {
         return handleKnownError(error);
       }
@@ -379,13 +374,8 @@ export function createDesktopAdminApiRouter(
     async postFolder(req) {
       try {
         const folder = getFolderParam(req);
-        if (!getGroupByFolder(db, folder)) {
-          return errorResponse(404, "group_not_found", `Group not found: ${folder}`);
-        }
-
         const body = createFolderSchema.parse(await req.json());
-        const response = createGroupDirectory(folder, body.path, rootDir);
-        return json(response, 201);
+        return json(createWorkspaceDirectory(folder, body.path, rootDir), 201);
       } catch (error) {
         return handleKnownError(error);
       }

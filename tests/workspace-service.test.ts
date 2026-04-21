@@ -37,37 +37,20 @@ describe("workspace service", () => {
       process.env.AGENT_PROFILES_PATH = createProfilesConfig(rootDir);
       const dbPath = join(rootDir, "store", "messages.db");
       const db = initDatabase(dbPath);
+      const registeredGroups = db.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'registered_groups'",
+      ).get();
+      const groupMemories = db.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'group_memories'",
+      ).get();
 
-      db.query(
-        `INSERT INTO registered_groups (
-           jid,
-           name,
-           folder,
-           channel_type,
-           trigger_pattern,
-           added_at,
-           requires_trigger,
-           is_main,
-           profile_key
-         ) VALUES (
-           'oc_feishu_demo',
-           'Feishu Demo',
-           'feishu_demo',
-           'feishu',
-           '',
-           '2026-04-21T00:00:00.000Z',
-           1,
-           1,
-           'claude'
-         )`,
-      ).run();
-      db.close();
+      expect(registeredGroups).toBeNull();
+      expect(groupMemories).toBeNull();
 
-      const reopened = initDatabase(dbPath);
-      const service = new WorkspaceService(reopened, { rootDir });
-
-      expect(service.getWorkspaceByFolder("feishu_demo")).toBeNull();
+      const service = new WorkspaceService(db, { rootDir });
       expect(service.listWorkspaces()).toHaveLength(0);
+
+      db.close();
     } finally {
       if (previousProfilesPath === undefined) {
         delete process.env.AGENT_PROFILES_PATH;

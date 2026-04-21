@@ -23,12 +23,12 @@ import {
   type SessionStartEvent,
 } from "@mariozechner/pi-coding-agent";
 import {
-  getGroupByFolder,
+  getChatById,
   getWorkspaceByFolder,
-  listGroupMemories,
   listWorkspaceMemories,
-  type GroupMemoryRow,
-  type RegisteredGroup,
+  type ChatRow,
+  type WorkspaceMemoryRow,
+  type WorkspaceRow,
 } from "../db";
 import { getWorkspaceDirectory } from "../group-workspace";
 import { createPiMcpExtensionBundle } from "../providers/pi-mcp-extension";
@@ -40,9 +40,9 @@ import {
 } from "../providers/pi-session-ref";
 import { adaptOctoTools } from "../providers/pi-tool-adapter";
 import type { MessageSender } from "../tools";
-import { createGroupToolDefs } from "../tools";
+import { createWorkspaceToolDefs } from "../tools";
 import { buildGroupExternalMcpServers } from "./group-external-mcp";
-import { buildGroupMemoryAppendSystemPrompt } from "./group-memory-prompt";
+import { buildWorkspaceMemoryAppendSystemPrompt } from "./group-memory-prompt";
 import { resolveAgentProfile } from "./profile-config";
 import { emitPiSessionShutdown } from "./pi-session-shutdown";
 import type { ResolvedAgentProfile } from "./types";
@@ -50,7 +50,8 @@ import type { ResolvedAgentProfile } from "./types";
 type PiApi = "anthropic-messages" | "openai-responses" | "openai-completions";
 
 export interface PiGroupRuntimeContext {
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
+  chat: ChatRow | null;
   workingDirectory: string;
   profile: ResolvedAgentProfile;
 }
@@ -66,6 +67,7 @@ export interface PiGroupSessionHost {
 export interface CreatePiGroupRuntimeFactoryOptions {
   db: Database;
   rootDir?: string;
+  chatId?: string;
   createMessageSender: (context: PiGroupRuntimeContext) => MessageSender;
   getExtensionFactories?: (
     context: PiGroupRuntimeContext,
@@ -116,7 +118,7 @@ export function buildProfileModelRegistry(
   return modelRegistry;
 }
 
-export function getGroupFolderFromWorkingDirectory(
+export function getWorkspaceFolderFromWorkingDirectory(
   workingDirectory: string,
   rootDir = process.cwd(),
 ): string | null {
@@ -130,79 +132,38 @@ export function getGroupFolderFromWorkingDirectory(
   return folder?.trim() || null;
 }
 
-export function getGroupForWorkingDirectory(
+export function getWorkspaceForWorkingDirectory(
   db: Database,
   workingDirectory: string,
   rootDir = process.cwd(),
-): RegisteredGroup | null {
-  const folder = getGroupFolderFromWorkingDirectory(workingDirectory, rootDir);
+): WorkspaceRow | null {
+  const folder = getWorkspaceFolderFromWorkingDirectory(workingDirectory, rootDir);
   if (!folder) {
     return null;
   }
 
-  return resolveRuntimeGroupState(db, folder)?.group ?? null;
+  return resolveRuntimeWorkspaceState(db, folder)?.workspace ?? null;
 }
 
-function buildWorkspaceBackedGroup(
-  folder: string,
-  workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>,
-): RegisteredGroup {
-  return {
-    jid: `workspace:${workspace.id}`,
-    name: workspace.name,
-    folder,
-    channel_type: "workspace",
-    trigger_pattern: "",
-    added_at: workspace.created_at,
-    requires_trigger: 0,
-    is_main: workspace.is_main,
-    profile_key: workspace.profile_key,
-  };
-}
-
-function mapWorkspaceMemoriesToGroupMemories(
-  folder: string,
-): (memory: ReturnType<typeof listWorkspaceMemories>[number]) => GroupMemoryRow {
-  return (memory) => ({
-    group_folder: folder,
-    key: memory.key,
-    key_type: memory.key_type,
-    value: memory.value,
-    source: memory.source,
-    created_at: memory.created_at,
-    updated_at: memory.updated_at,
-  });
-}
-
-function resolveRuntimeGroupState(
+function resolveRuntimeWorkspaceState(
   db: Database,
   folder: string,
 ): {
-  group: RegisteredGroup;
-  memories: GroupMemoryRow[];
+  workspace: WorkspaceRow;
+  memories: WorkspaceMemoryRow[];
 } | null {
-  const group = getGroupByFolder(db, folder);
-  if (group) {
-    return {
-      group,
-      memories: listGroupMemories(db, folder),
-    };
-  }
-
   const workspace = getWorkspaceByFolder(db, folder);
   if (!workspace) {
     return null;
   }
 
   return {
-    group: buildWorkspaceBackedGroup(folder, workspace),
-    memories: listWorkspaceMemories(db, workspace.id).map(
-      mapWorkspaceMemoriesToGroupMemories(folder),
-    ),
+    workspace,
+    memories: listWorkspaceMemories(db, workspace.id),
   };
 }
 
-export function resolveGroupSessionRef(
+export function resolveWorkspaceSessionRef(
   workingDirectory: string,
   sessionRefOverride?: string | null,
 ): string {
@@ -249,22 +210,24 @@ export function createPiGroupRuntimeFactory(
     sessionManager,
     sessionStartEvent,
   }): Promise<CreateAgentSessionRuntimeResult> => {
-    const folder = getGroupFolderFromWorkingDirectory(cwd, rootDir);
-    const runtimeState = folder ? resolveRuntimeGroupState(options.db, folder) : null;
+    const folder = getWorkspaceFolderFromWorkingDirectory(cwd, rootDir);
+    const runtimeState = folder ? resolveRuntimeWorkspaceState(options.db, folder) : null;
     if (!runtimeState) {
       throw new Error(`No runtime workspace matches cwd: ${cwd}`);
     }
 
-    const { group, memories } = runtimeState;
-    const profile = resolveAgentProfile(group.profile_key);
+    const { workspace, memories } = runtimeState;
+    const chat = options.chatId ? getChatById(options.db, options.chatId) : null;
+    const profile = resolveAgentProfile(workspace.profile_key);
     const context: PiGroupRuntimeContext = {
-      group,
+      workspace,
+      chat,
       workingDirectory: cwd,
       profile,
     };
 
     const mcpBundle = await createPiMcpExtensionBundle(
-      buildGroupExternalMcpServers(group.folder, rootDir),
+      buildGroupExternalMcpServers(workspace.folder, rootDir),
       cwd,
     );
 
@@ -275,7 +238,7 @@ export function createPiGroupRuntimeFactory(
         agentDir,
         modelRegistry: buildProfileModelRegistry(profile),
         resourceLoaderOptions: {
-          appendSystemPrompt: buildGroupMemoryAppendSystemPrompt(
+          appendSystemPrompt: buildWorkspaceMemoryAppendSystemPrompt(
             memories,
           ),
           extensionFactories: [
@@ -294,13 +257,12 @@ export function createPiGroupRuntimeFactory(
 
       const sender = options.createMessageSender(context);
       const customTools = adaptOctoTools(
-        createGroupToolDefs(
-          group.folder,
-          group.is_main === 1,
-          options.db,
-          sender,
-          rootDir,
-        ),
+        createWorkspaceToolDefs({
+          workspaceId: workspace.id,
+          workspaceFolder: workspace.folder,
+          chatId: chat?.id ?? "",
+          isMain: workspace.is_main === 1,
+        }, options.db, sender, rootDir),
       );
 
       const created = await createAgentSessionFromServices({
@@ -334,24 +296,24 @@ export function createPiGroupRuntimeFactory(
 
 export async function createPiGroupRuntime(
   options: CreatePiGroupRuntimeFactoryOptions & {
-    groupFolder: string;
+    workspaceFolder: string;
     agentDir?: string;
     sessionRefOverride?: string | null;
   },
 ): Promise<{
   runtime: AgentSessionRuntime;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const runtimeState = resolveRuntimeGroupState(options.db, options.groupFolder);
+  const runtimeState = resolveRuntimeWorkspaceState(options.db, options.workspaceFolder);
   if (!runtimeState) {
-    throw new Error(`Group not found: ${options.groupFolder}`);
+    throw new Error(`Workspace not found: ${options.workspaceFolder}`);
   }
 
-  const { group } = runtimeState;
-  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
-  const sessionRef = resolveGroupSessionRef(
+  const { workspace } = runtimeState;
+  const workingDirectory = getWorkspaceDirectory(workspace.folder, { rootDir });
+  const sessionRef = resolveWorkspaceSessionRef(
     workingDirectory,
     options.sessionRefOverride,
   );
@@ -367,32 +329,32 @@ export async function createPiGroupRuntime(
 
   return {
     runtime,
-    group,
+    workspace,
     sessionRef: runtime.session.sessionFile ?? sessionRef,
   };
 }
 
 export async function createPiGroupSessionHost(
   options: CreatePiGroupRuntimeFactoryOptions & {
-    groupFolder: string;
+    workspaceFolder: string;
     agentDir?: string;
     sessionStartEvent?: SessionStartEvent;
     sessionRefOverride?: string | null;
   },
 ): Promise<{
   host: PiGroupSessionHost;
-  group: RegisteredGroup;
+  workspace: WorkspaceRow;
   sessionRef: string;
 }> {
   const rootDir = options.rootDir ?? process.cwd();
-  const runtimeState = resolveRuntimeGroupState(options.db, options.groupFolder);
+  const runtimeState = resolveRuntimeWorkspaceState(options.db, options.workspaceFolder);
   if (!runtimeState) {
-    throw new Error(`Group not found: ${options.groupFolder}`);
+    throw new Error(`Workspace not found: ${options.workspaceFolder}`);
   }
 
-  const { group } = runtimeState;
-  const workingDirectory = getWorkspaceDirectory(group.folder, { rootDir });
-  const sessionRef = resolveGroupSessionRef(
+  const { workspace } = runtimeState;
+  const workingDirectory = getWorkspaceDirectory(workspace.folder, { rootDir });
+  const sessionRef = resolveWorkspaceSessionRef(
     workingDirectory,
     options.sessionRefOverride,
   );
@@ -417,7 +379,7 @@ export async function createPiGroupSessionHost(
         created.session.dispose();
       },
     },
-    group,
+    workspace,
     sessionRef: resolvedSessionRef,
   };
 }

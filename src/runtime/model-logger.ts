@@ -19,7 +19,7 @@ export interface ModelInteractionLogEntry {
   profileKey: string;
   provider?: string;
   model?: string;
-  groupFolder: string;
+  workspaceFolder: string;
   url: string;
   method: string;
   status?: number;
@@ -33,16 +33,16 @@ export const MAX_MODEL_LOG_BYTES = 80 * 1024 * 1024;
 
 const DEFAULT_LOG_DIR = "store/logs";
 const MODEL_LOG_DIR = "model";
-const UNKNOWN_GROUP_FOLDER = "_unknown";
+const UNKNOWN_WORKSPACE_FOLDER = "_unknown";
 
 function getLogDir(): string {
   return process.env.LOG_DIR ?? DEFAULT_LOG_DIR;
 }
 
-function normalizeGroupFolder(groupFolder: string): string {
-  const trimmed = groupFolder.trim();
+function normalizeWorkspaceFolder(workspaceFolder: string): string {
+  const trimmed = workspaceFolder.trim();
   if (!trimmed) {
-    return UNKNOWN_GROUP_FOLDER;
+    return UNKNOWN_WORKSPACE_FOLDER;
   }
 
   return trimmed.replace(/[\\/]/g, "_");
@@ -68,10 +68,10 @@ function getFileSize(filePath: string): number {
   }
 }
 
-function ensureModelLogDir(groupFolder: string): string {
-  const groupDir = join(getLogDir(), MODEL_LOG_DIR, normalizeGroupFolder(groupFolder));
-  mkdirSync(groupDir, { recursive: true });
-  return groupDir;
+function ensureModelLogDir(workspaceFolder: string): string {
+  const workspaceDir = join(getLogDir(), MODEL_LOG_DIR, normalizeWorkspaceFolder(workspaceFolder));
+  mkdirSync(workspaceDir, { recursive: true });
+  return workspaceDir;
 }
 
 function isSensitiveHeaderName(headerName: string): boolean {
@@ -192,17 +192,17 @@ export function redactHeaders(headers: unknown): Record<string, unknown> {
 }
 
 export function resolveModelLogFilePath(
-  groupFolder: string,
+  workspaceFolder: string,
   line: string,
   now: Date = new Date(),
 ): string {
-  const groupDir = ensureModelLogDir(groupFolder);
+  const workspaceDir = ensureModelLogDir(workspaceFolder);
   const baseName = getBaseFileName(now);
   const lineBytes = Buffer.byteLength(line + "\n");
 
   for (let index = 0; ; index += 1) {
     const suffix = index === 0 ? "" : `.${index}`;
-    const filePath = join(groupDir, `${baseName}${suffix}.jsonl`);
+    const filePath = join(workspaceDir, `${baseName}${suffix}.jsonl`);
     const nextSize = getFileSize(filePath) + lineBytes;
     if (nextSize <= MAX_MODEL_LOG_BYTES) {
       return filePath;
@@ -217,7 +217,7 @@ export function serializeModelLogEntry(
   const normalized: ModelInteractionLogEntry = {
     ...entry,
     ts: entry.ts ?? now.toISOString(),
-    groupFolder: entry.groupFolder || UNKNOWN_GROUP_FOLDER,
+    workspaceFolder: entry.workspaceFolder || UNKNOWN_WORKSPACE_FOLDER,
     headers: entry.headers ? redactHeaders(entry.headers) : undefined,
     body: entry.body === undefined ? undefined : toSerializableBody(entry.body),
     meta: entry.meta === undefined ? undefined : toSerializableBody(entry.meta) as Record<string, unknown>,
@@ -232,7 +232,7 @@ export function writeModelLog(
 ): void {
   try {
     const line = serializeModelLogEntry(entry, now);
-    const filePath = resolveModelLogFilePath(entry.groupFolder, line, now);
+    const filePath = resolveModelLogFilePath(entry.workspaceFolder, line, now);
     appendFileSync(filePath, line + "\n");
   } catch {
     // Ignore model log write failures to avoid breaking the request path.
@@ -241,5 +241,5 @@ export function writeModelLog(
 
 export const __test__ = {
   getDatePart,
-  normalizeGroupFolder,
+  normalizeWorkspaceFolder,
 };

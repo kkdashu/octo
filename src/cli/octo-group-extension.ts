@@ -1,49 +1,50 @@
 import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
-import type { ChatRow, RegisteredGroup } from "../db";
-import { GroupService } from "../group-service";
+import type { ChatRow } from "../db";
 import { log } from "../logger";
 import { WorkspaceService } from "../workspace-service";
 import {
   formatChatOption,
-  formatGroupOption,
-  selectCliGroup,
+  formatWorkspaceOption,
+  selectWorkspace,
   selectWorkspaceChat,
 } from "./group-selector";
 import { OctoCliRuntimeHost } from "./octo-cli-runtime-host";
 
 export interface OctoGroupExtensionOptions {
-  groupService: GroupService;
   workspaceService: WorkspaceService;
   getRuntimeHost(): OctoCliRuntimeHost | null;
 }
 
 const TAG = "octo-group-extension";
 
-function listSortedCliGroups(groupService: GroupService): RegisteredGroup[] {
-  return groupService.listCliGroups();
+function listCliWorkspaces(workspaceService: WorkspaceService) {
+  return workspaceService
+    .listWorkspaces()
+    .filter((workspace) => workspace.folder.startsWith("cli_"))
+    .sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
-function findCliGroup(
-  groupService: GroupService,
+function findCliWorkspace(
+  workspaceService: WorkspaceService,
   rawQuery: string,
-): RegisteredGroup | null {
+) {
   const query = rawQuery.trim();
   if (!query) {
     return null;
   }
 
-  const groups = listSortedCliGroups(groupService);
-  const exactFolder = groups.find((group) => group.folder === query);
+  const workspaces = listCliWorkspaces(workspaceService);
+  const exactFolder = workspaces.find((workspace) => workspace.folder === query);
   if (exactFolder) {
     return exactFolder;
   }
 
-  const exactName = groups.find((group) => group.name === query);
+  const exactName = workspaces.find((workspace) => workspace.name === query);
   if (exactName) {
     return exactName;
   }
 
-  const prefixMatches = groups.filter((group) => group.folder.startsWith(query));
+  const prefixMatches = workspaces.filter((workspace) => workspace.folder.startsWith(query));
   if (prefixMatches.length === 1) {
     return prefixMatches[0]!;
   }
@@ -51,17 +52,17 @@ function findCliGroup(
   return null;
 }
 
-function buildGroupCompletions(groupService: GroupService, prefix: string) {
+function buildWorkspaceCompletions(workspaceService: WorkspaceService, prefix: string) {
   const normalizedPrefix = prefix.trim();
-  return listSortedCliGroups(groupService)
-    .filter((group) =>
-      normalizedPrefix.length === 0 ||
-      group.folder.startsWith(normalizedPrefix) ||
-      group.name.startsWith(normalizedPrefix)
+  return listCliWorkspaces(workspaceService)
+    .filter((workspace) =>
+      normalizedPrefix.length === 0
+      || workspace.folder.startsWith(normalizedPrefix)
+      || workspace.name.startsWith(normalizedPrefix)
     )
-    .map((group) => ({
-      value: group.folder,
-      label: formatGroupOption(group),
+    .map((workspace) => ({
+      value: workspace.folder,
+      label: formatWorkspaceOption(workspace),
     }));
 }
 
@@ -110,9 +111,9 @@ function buildChatCompletions(
   const normalizedPrefix = prefix.trim();
   return listWorkspaceChats(workspaceService, workspaceId)
     .filter((chat) =>
-      normalizedPrefix.length === 0 ||
-      chat.id.startsWith(normalizedPrefix) ||
-      chat.title.startsWith(normalizedPrefix)
+      normalizedPrefix.length === 0
+      || chat.id.startsWith(normalizedPrefix)
+      || chat.title.startsWith(normalizedPrefix)
     )
     .map((chat) => ({
       value: chat.id,
@@ -131,77 +132,6 @@ function getRuntimeHost(
   return runtimeHost;
 }
 
-async function resolveSwitchTarget(
-  groupService: GroupService,
-  runtimeHost: OctoCliRuntimeHost,
-  ui: Parameters<ExtensionFactory>[0] extends never ? never : {
-    select: (
-      title: string,
-      options: string[],
-      opts?: { timeout?: number; signal?: AbortSignal },
-    ) => Promise<string | undefined>;
-    notify(message: string, type?: "info" | "warning" | "error"): void;
-  },
-  rawArgs: string,
-): Promise<RegisteredGroup | undefined> {
-  const query = rawArgs.trim();
-  if (query) {
-    const directMatch = findCliGroup(groupService, query);
-    if (!directMatch) {
-      ui.notify(`CLI group not found: ${query}`, "error");
-      return undefined;
-    }
-
-    return directMatch;
-  }
-
-  const selected = await selectCliGroup(
-    ui,
-    listSortedCliGroups(groupService),
-    runtimeHost.getCurrentGroup().folder,
-    "Switch CLI Group",
-  );
-
-  if (!selected) {
-    return undefined;
-  }
-
-  return selected;
-}
-
-async function resolveChatSwitchTarget(
-  workspaceService: WorkspaceService,
-  runtimeHost: OctoCliRuntimeHost,
-  ui: Parameters<ExtensionFactory>[0] extends never ? never : {
-    select: (
-      title: string,
-      options: string[],
-      opts?: { timeout?: number; signal?: AbortSignal },
-    ) => Promise<string | undefined>;
-    notify(message: string, type?: "info" | "warning" | "error"): void;
-  },
-  rawArgs: string,
-): Promise<ChatRow | undefined> {
-  const workspace = runtimeHost.getCurrentWorkspace();
-  const query = rawArgs.trim();
-  if (query) {
-    const directMatch = findWorkspaceChat(workspaceService, workspace.id, query);
-    if (!directMatch) {
-      ui.notify(`Workspace chat not found: ${query}`, "error");
-      return undefined;
-    }
-
-    return directMatch;
-  }
-
-  return selectWorkspaceChat(
-    ui,
-    listWorkspaceChats(workspaceService, workspace.id),
-    runtimeHost.getCurrentChat().id,
-    `Chats in ${workspace.name}`,
-  );
-}
-
 export function createOctoGroupExtension(
   options: OctoGroupExtensionOptions,
 ): ExtensionFactory {
@@ -216,38 +146,27 @@ export function createOctoGroupExtension(
         ) || "";
 
         await ctx.waitForIdle();
-        const created = options.groupService.createCliGroup({
+        const { workspace, chat } = options.workspaceService.createCliWorkspace({
           name: requestedName || undefined,
         });
-        log.info(TAG, "Created CLI workspace group from command", {
-          requestedName: requestedName || null,
-          groupFolder: created.folder,
-          groupName: created.name,
+        log.info(TAG, "Created CLI workspace from command", {
+          workspaceFolder: workspace.folder,
+          workspaceName: workspace.name,
+          chatId: chat.id,
         });
-        const workspace = options.workspaceService.getWorkspaceByFolder(created.folder);
-        if (!workspace) {
-          throw new Error(`Workspace not found: ${created.folder}`);
-        }
-
-        const chat = options.workspaceService.listChats(workspace.id)[0]
-          ?? options.workspaceService.createChat(workspace.id, {
-            title: created.name,
-            requiresTrigger: false,
-          });
         await runtimeHost.switchWorkspace(workspace, chat);
         ctx.ui.notify(`Switched to ${workspace.folder}`, "info");
       },
     } satisfies Parameters<Parameters<ExtensionFactory>[0]["registerCommand"]>[1];
     pi.registerCommand("new-workspace", newWorkspaceCommand);
-    pi.registerCommand("new-group", newWorkspaceCommand);
 
-    const listWorkspacesCommand = {
+    pi.registerCommand("workspaces", {
       description: "List Octo CLI workspaces and switch via picker",
       handler: async (_args, ctx) => {
         const runtimeHost = getRuntimeHost(options);
-        const selected = await selectCliGroup(
+        const selected = await selectWorkspace(
           ctx.ui,
-          listSortedCliGroups(options.groupService),
+          listCliWorkspaces(options.workspaceService),
           runtimeHost.getCurrentWorkspace().folder,
           "CLI Workspaces",
         );
@@ -262,43 +181,45 @@ export function createOctoGroupExtension(
         }
 
         await ctx.waitForIdle();
-        await runtimeHost.switchGroup(selected);
+        await runtimeHost.switchWorkspace(selected);
         ctx.ui.notify(`Switched to ${selected.folder}`, "info");
       },
-    } satisfies Parameters<Parameters<ExtensionFactory>[0]["registerCommand"]>[1];
-    pi.registerCommand("workspaces", listWorkspacesCommand);
-    pi.registerCommand("groups", listWorkspacesCommand);
+    });
 
-    const switchWorkspaceCommand = {
+    pi.registerCommand("switch-workspace", {
       description: "Switch to another Octo CLI workspace",
-      getArgumentCompletions: (prefix) => buildGroupCompletions(options.groupService, prefix),
+      getArgumentCompletions: (prefix) =>
+        buildWorkspaceCompletions(options.workspaceService, prefix),
       handler: async (args, ctx) => {
         const runtimeHost = getRuntimeHost(options);
-        const targetGroup = await resolveSwitchTarget(
-          options.groupService,
-          runtimeHost,
-          ctx.ui,
-          args,
-        );
+        const targetWorkspace = args.trim()
+          ? findCliWorkspace(options.workspaceService, args)
+          : await selectWorkspace(
+            ctx.ui,
+            listCliWorkspaces(options.workspaceService),
+            runtimeHost.getCurrentWorkspace().folder,
+            "Switch Workspace",
+          );
 
-        if (!targetGroup) {
+        if (!targetWorkspace) {
+          if (args.trim()) {
+            ctx.ui.notify(`Workspace not found: ${args.trim()}`, "error");
+          }
           return;
         }
 
-        if (targetGroup.folder === runtimeHost.getCurrentWorkspace().folder) {
-          ctx.ui.notify(`Already in ${targetGroup.folder}`, "info");
+        if (targetWorkspace.folder === runtimeHost.getCurrentWorkspace().folder) {
+          ctx.ui.notify(`Already in ${targetWorkspace.folder}`, "info");
           return;
         }
 
         await ctx.waitForIdle();
-        await runtimeHost.switchGroup(targetGroup);
-        ctx.ui.notify(`Switched to ${targetGroup.folder}`, "info");
+        await runtimeHost.switchWorkspace(targetWorkspace);
+        ctx.ui.notify(`Switched to ${targetWorkspace.folder}`, "info");
       },
-    } satisfies Parameters<Parameters<ExtensionFactory>[0]["registerCommand"]>[1];
-    pi.registerCommand("switch-workspace", switchWorkspaceCommand);
-    pi.registerCommand("switch-group", switchWorkspaceCommand);
+    });
 
-    const renameWorkspaceCommand = {
+    pi.registerCommand("rename-workspace", {
       description: "Rename the current Octo CLI workspace",
       handler: async (args, ctx) => {
         const runtimeHost = getRuntimeHost(options);
@@ -312,15 +233,13 @@ export function createOctoGroupExtension(
           return;
         }
 
-        const renamed = options.groupService.renameGroup(
-          currentWorkspace.folder,
+        const renamed = options.workspaceService.renameWorkspace(
+          currentWorkspace.id,
           requestedName,
         );
         ctx.ui.notify(`Renamed ${renamed.folder} to ${renamed.name}`, "info");
       },
-    } satisfies Parameters<Parameters<ExtensionFactory>[0]["registerCommand"]>[1];
-    pi.registerCommand("rename-workspace", renameWorkspaceCommand);
-    pi.registerCommand("rename-group", renameWorkspaceCommand);
+    });
 
     pi.registerCommand("new-chat", {
       description: "Create a new chat in the current workspace and switch to it",
@@ -336,12 +255,6 @@ export function createOctoGroupExtension(
         const chat = options.workspaceService.createChat(workspace.id, {
           title: requestedTitle || undefined,
           requiresTrigger: false,
-        });
-        log.info(TAG, "Created CLI workspace chat from command", {
-          workspaceFolder: workspace.folder,
-          chatId: chat.id,
-          chatTitle: chat.title,
-          sessionRef: chat.session_ref,
         });
         await runtimeHost.switchChat(chat);
         ctx.ui.notify(`Switched to ${chat.title}`, "info");
@@ -379,29 +292,34 @@ export function createOctoGroupExtension(
 
     pi.registerCommand("switch-chat", {
       description: "Switch to another chat in the current workspace",
-      getArgumentCompletions: (prefix) => {
-        const runtimeHost = options.getRuntimeHost();
-        if (!runtimeHost) {
-          return [];
-        }
-
-        return buildChatCompletions(
-          options.workspaceService,
-          runtimeHost.getCurrentWorkspace().id,
-          runtimeHost.getCurrentChat().id,
-          prefix,
-        );
-      },
+      getArgumentCompletions: (prefix) => buildChatCompletions(
+        options.workspaceService,
+        getRuntimeHost(options).getCurrentWorkspace().id,
+        getRuntimeHost(options).getCurrentChat().id,
+        prefix,
+      ),
       handler: async (args, ctx) => {
         const runtimeHost = getRuntimeHost(options);
-        const targetChat = await resolveChatSwitchTarget(
-          options.workspaceService,
-          runtimeHost,
-          ctx.ui,
-          args,
-        );
+        const targetChat = args.trim()
+          ? findWorkspaceChat(
+            options.workspaceService,
+            runtimeHost.getCurrentWorkspace().id,
+            args,
+          )
+          : await selectWorkspaceChat(
+            ctx.ui,
+            listWorkspaceChats(
+              options.workspaceService,
+              runtimeHost.getCurrentWorkspace().id,
+            ),
+            runtimeHost.getCurrentChat().id,
+            `Chats in ${runtimeHost.getCurrentWorkspace().name}`,
+          );
 
         if (!targetChat) {
+          if (args.trim()) {
+            ctx.ui.notify(`Workspace chat not found: ${args.trim()}`, "error");
+          }
           return;
         }
 
@@ -411,21 +329,9 @@ export function createOctoGroupExtension(
         }
 
         await ctx.waitForIdle();
-        log.info(TAG, "Switching CLI workspace chat from command", {
-          workspaceFolder: runtimeHost.getCurrentWorkspace().folder,
-          fromChatId: runtimeHost.getCurrentChat().id,
-          toChatId: targetChat.id,
-        });
         await runtimeHost.switchChat(targetChat);
         ctx.ui.notify(`Switched to ${targetChat.title}`, "info");
       },
     });
   };
 }
-
-export const __test__ = {
-  buildChatCompletions,
-  buildGroupCompletions,
-  findCliGroup,
-  findWorkspaceChat,
-};

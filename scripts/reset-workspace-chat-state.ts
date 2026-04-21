@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 
 const TABLES_TO_CLEAR = [
@@ -12,8 +12,6 @@ const TABLES_TO_CLEAR = [
   "workspace_memories",
   "workspaces",
   "scheduled_tasks",
-  "group_memories",
-  "registered_groups",
   "messages",
   "router_state",
 ] as const;
@@ -49,6 +47,33 @@ export function clearWorkspaceDirectories(rootDir?: string): void {
   }
 }
 
+export function clearLegacyWorkspaceLinks(rootDir?: string): void {
+  const resolvedRootDir = resolveRootDir(rootDir);
+  const groupsRoot = resolve(resolvedRootDir, "groups");
+  if (!existsSync(groupsRoot)) {
+    return;
+  }
+
+  const workspacesRoot = resolve(resolvedRootDir, "workspaces");
+  for (const entry of readdirSync(groupsRoot)) {
+    const targetPath = resolve(groupsRoot, entry);
+    const stat = lstatSync(targetPath);
+    if (!stat.isSymbolicLink()) {
+      continue;
+    }
+
+    const linkTarget = readlinkSync(targetPath);
+    const resolvedTarget = resolve(groupsRoot, linkTarget);
+    if (
+      resolvedTarget === workspacesRoot
+      || resolvedTarget.startsWith(`${workspacesRoot}${sep}`)
+    ) {
+      ensurePathWithinRoot(targetPath, groupsRoot);
+      rmSync(targetPath, { recursive: true, force: true });
+    }
+  }
+}
+
 function clearDatabaseTables(db: Database): void {
   db.run("BEGIN IMMEDIATE");
 
@@ -71,6 +96,7 @@ export function resetWorkspaceChatState(
   const workspacesRoot = resolve(rootDir, "workspaces");
 
   clearWorkspaceDirectories(rootDir);
+  clearLegacyWorkspaceLinks(rootDir);
 
   if (existsSync(dbPath)) {
     const db = new Database(dbPath, { create: false, strict: true });

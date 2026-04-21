@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initDatabase } from "../src/db";
@@ -28,8 +36,13 @@ describe("reset workspace chat state script", () => {
 
     try {
       mkdirSync(join(rootDir, "workspaces", "demo"), { recursive: true });
+      mkdirSync(join(rootDir, "groups"), { recursive: true });
       writeFileSync(join(rootDir, "workspaces", "demo", "note.txt"), "stale");
       writeFileSync(join(rootDir, "workspaces", "stale-file.txt"), "stale");
+      symlinkSync(
+        join(rootDir, "workspaces", "demo"),
+        join(rootDir, "groups", "demo"),
+      );
 
       const db = initDatabase(dbPath);
       db.query(
@@ -149,8 +162,8 @@ describe("reset workspace chat state script", () => {
       db.query(
         `INSERT INTO scheduled_tasks (
            id,
-           group_folder,
-           chat_jid,
+           workspace_id,
+           chat_id,
            prompt,
            schedule_type,
            schedule_value,
@@ -162,8 +175,8 @@ describe("reset workspace chat state script", () => {
            created_at
          ) VALUES (
            'task1',
-           'demo',
-           'oc_demo',
+           'ws1',
+           'chat1',
            'hello',
            'cron',
            '* * * * *',
@@ -173,33 +186,6 @@ describe("reset workspace chat state script", () => {
            NULL,
            'active',
            '2026-04-21T00:00:00.000Z'
-         )`,
-      ).run();
-      db.query(
-        `INSERT INTO group_memories (group_folder, key, key_type, value, source, created_at, updated_at)
-         VALUES ('demo', 'topic', 'builtin', 'demo', 'user', '2026-04-21T00:00:00.000Z', '2026-04-21T00:00:00.000Z')`,
-      ).run();
-      db.query(
-        `INSERT INTO registered_groups (
-           jid,
-           name,
-           folder,
-           channel_type,
-           trigger_pattern,
-           added_at,
-           requires_trigger,
-           is_main,
-           profile_key
-         ) VALUES (
-           'oc_demo',
-           'Demo',
-           'demo',
-           'feishu',
-           '',
-           '2026-04-21T00:00:00.000Z',
-           0,
-           1,
-           'claude'
          )`,
       ).run();
       db.query(
@@ -235,6 +221,7 @@ describe("reset workspace chat state script", () => {
 
       expect(existsSync(join(rootDir, "workspaces"))).toBe(true);
       expect(readdirSync(join(rootDir, "workspaces"))).toHaveLength(0);
+      expect(existsSync(join(rootDir, "groups", "demo"))).toBe(false);
       expect(countRows(dbPath, "workspaces")).toBe(0);
       expect(countRows(dbPath, "workspace_bindings")).toBe(0);
       expect(countRows(dbPath, "chats")).toBe(0);
@@ -244,8 +231,6 @@ describe("reset workspace chat state script", () => {
       expect(countRows(dbPath, "run_events")).toBe(0);
       expect(countRows(dbPath, "workspace_memories")).toBe(0);
       expect(countRows(dbPath, "scheduled_tasks")).toBe(0);
-      expect(countRows(dbPath, "group_memories")).toBe(0);
-      expect(countRows(dbPath, "registered_groups")).toBe(0);
       expect(countRows(dbPath, "messages")).toBe(0);
       expect(countRows(dbPath, "router_state")).toBe(0);
     } finally {

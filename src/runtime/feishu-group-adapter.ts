@@ -82,17 +82,7 @@ export interface FeishuGroupAdapterOptions {
   createChatSessionHost?: (
     chatId: string,
   ) => Promise<CreateChatSessionHostResult>;
-  createGroupSessionHost?: (
-    groupFolder: string,
-  ) => Promise<{
-    host: PiGroupSessionHost;
-    group: {
-      folder: string;
-    };
-    sessionRef: string;
-  }>;
   resetChatSession?: (chatId: string) => Promise<string>;
-  resetGroupSession?: (groupFolder: string) => Promise<string>;
   preparePrompt?: (chatId: string, text: string) => Promise<string>;
 }
 
@@ -158,28 +148,15 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
       ?? new WorkspaceService(options.db, { rootDir: options.rootDir ?? process.cwd() });
     this.concurrencyLimit = options.concurrencyLimit ?? 3;
     this.rootDir = options.rootDir ?? process.cwd();
-    const legacyCreateGroupSessionHost = options.createGroupSessionHost;
     this.createChatSessionHost = options.createChatSessionHost
-      ?? (legacyCreateGroupSessionHost
-        ? async (chatId) => {
-          const chat = this.resolveChat(chatId);
-          const workspace = this.getWorkspaceForChat(chat);
-          const created = await legacyCreateGroupSessionHost(workspace.folder);
-          return {
-            host: created.host,
-            workspace,
-            chat,
-            sessionRef: created.sessionRef,
-          };
-        }
-        : undefined)
       ?? (async (chatId) => {
         const chat = this.resolveChat(chatId);
         const workspace = this.getWorkspaceForChat(chat);
         const { host, sessionRef } = await createPiGroupSessionHost({
           db: options.db,
           rootDir: this.rootDir,
-          groupFolder: workspace.folder,
+          chatId: chat.id,
+          workspaceFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
           sessionRefOverride: chat.session_ref,
         });
@@ -191,22 +168,15 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
           sessionRef,
         };
       });
-    const legacyResetGroupSession = options.resetGroupSession;
     this.resetChatSession = options.resetChatSession
-      ?? (legacyResetGroupSession
-        ? async (chatId) => {
-          const chat = this.resolveChat(chatId);
-          const workspace = this.getWorkspaceForChat(chat);
-          return legacyResetGroupSession(workspace.folder);
-        }
-        : undefined)
       ?? (async (chatId) => {
         const chat = this.resolveChat(chatId);
         const workspace = this.getWorkspaceForChat(chat);
         const { runtime, sessionRef } = await createPiGroupRuntime({
           db: options.db,
           rootDir: this.rootDir,
-          groupFolder: workspace.folder,
+          chatId: chat.id,
+          workspaceFolder: workspace.folder,
           createMessageSender: (context) => this.createMessageSender(context),
           sessionRefOverride: chat.session_ref,
         });
@@ -361,26 +331,15 @@ export class FeishuGroupAdapter implements GroupRuntimeController {
 
   private createMessageSender(_context: PiGroupRuntimeContext) {
     return {
-      send: (chatJid: string, text: string) => this.options.channelManager.send(chatJid, text),
-      sendImage: (chatJid: string, filePath: string) =>
-        this.options.channelManager.sendImage(chatJid, filePath),
-      refreshGroupMetadata: async () => {
+      send: (externalChatId: string, text: string) =>
+        this.options.channelManager.send(externalChatId, text),
+      sendImage: (externalChatId: string, filePath: string) =>
+        this.options.channelManager.sendImage(externalChatId, filePath),
+      refreshChatMetadata: async () => {
         const chats = await this.options.channelManager.refreshGroupMetadata();
         return { count: chats.length };
       },
-      clearSession: async (folder: string) => {
-        const workspace = this.workspaceService.getWorkspaceByFolder(folder);
-        if (!workspace) {
-          throw new Error(`Workspace not found: ${folder}`);
-        }
-
-        const defaultChat = this.workspaceService.listChats(workspace.id)[0] ?? null;
-        if (!defaultChat) {
-          throw new Error(`Chat not found for workspace: ${folder}`);
-        }
-
-        return this.clearSession(defaultChat.id);
-      },
+      clearSession: async (chatId: string) => this.clearSession(chatId),
     };
   }
 

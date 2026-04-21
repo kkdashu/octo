@@ -41,6 +41,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 store/*.db
 store/*.db-wal
 store/*.db-shm
+store/cli-state.json
 
 # Log files
 store/logs/

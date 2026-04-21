@@ -7,19 +7,18 @@ export interface DesktopAdminProfileOption {
   codingPlanEnabled: boolean;
 }
 
-export interface DesktopAdminGroupDto {
-  jid: string;
+export interface DesktopAdminWorkspaceDto {
+  id: string;
   name: string;
   folder: string;
-  channelType: string;
   triggerPattern: string;
   requiresTrigger: boolean;
   isMain: boolean;
   profileKey: string;
-  addedAt: string;
+  createdAt: string;
 }
 
-export interface DesktopAdminGroupMemoryDto {
+export interface DesktopAdminWorkspaceMemoryDto {
   key: string;
   keyType: "builtin" | "custom";
   value: string;
@@ -28,15 +27,15 @@ export interface DesktopAdminGroupMemoryDto {
   updatedAt: string;
 }
 
-export interface DesktopAdminGroupListResponse {
-  groups: DesktopAdminGroupDto[];
+export interface DesktopAdminWorkspaceListResponse {
+  workspaces: DesktopAdminWorkspaceDto[];
   availableProfiles: DesktopAdminProfileOption[];
 }
 
-export interface DesktopAdminGroupDetailResponse {
-  group: DesktopAdminGroupDto;
+export interface DesktopAdminWorkspaceDetailResponse {
+  workspace: DesktopAdminWorkspaceDto;
   availableProfiles: DesktopAdminProfileOption[];
-  memories: DesktopAdminGroupMemoryDto[];
+  memories: DesktopAdminWorkspaceMemoryDto[];
 }
 
 export type DesktopAdminDirectoryEntryKind = "file" | "directory";
