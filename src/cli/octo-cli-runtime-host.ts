@@ -133,21 +133,6 @@ export class OctoCliRuntimeHost extends AgentSessionRuntime {
     return { cancelled: result.cancelled };
   }
 
-  override async switchSession(
-    sessionPath: string,
-    cwdOverride?: string,
-  ): Promise<{ cancelled: boolean }> {
-    const result = await this.options.manager.switchSession(
-      this.currentChat.id,
-      sessionPath,
-      cwdOverride,
-    );
-    if (!result.cancelled) {
-      this.applyResult(result);
-    }
-    return { cancelled: result.cancelled };
-  }
-
   async switchChat(chat: ChatRow): Promise<{ cancelled: boolean }> {
     log.info(TAG, "Switching CLI chat", {
       fromChatId: this.currentChat.id,

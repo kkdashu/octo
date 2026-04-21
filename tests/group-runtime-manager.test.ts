@@ -167,7 +167,6 @@ function createFakeRuntime(initialCwd: string): {
     modelFallbackMessage: undefined,
     newSession: async () => ({ cancelled: false }),
     fork: async () => ({ cancelled: false }),
-    switchSession: async () => ({ cancelled: false }),
     importFromJsonl: async () => ({ cancelled: false }),
     dispose: async () => {},
   };

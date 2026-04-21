@@ -10,7 +10,6 @@ import {
   appendRunEvent,
   createRun,
   getChatById,
-  getChatBySessionRef,
   getGroupByFolder,
   getRunById,
   getWorkspaceRuntimeState,
@@ -26,7 +25,6 @@ import type { MessageSender } from "../tools";
 import type { PiGroupRuntimeContext } from "../runtime/pi-group-runtime-factory";
 import {
   createPiGroupRuntime,
-  getGroupFolderFromWorkingDirectory,
 } from "../runtime/pi-group-runtime-factory";
 import {
   checkoutWorkspaceBranch,
@@ -43,7 +41,6 @@ import {
   toRenderableAssistantDelta,
   toRenderableMessage,
 } from "./renderable-message";
-import { getSessionHeader } from "./session-file";
 import type {
   GroupRuntimeEvent,
   GroupRuntimeListener,
@@ -284,63 +281,6 @@ export class GroupRuntimeManager implements GroupRuntimeSnapshotController {
 
   async switchGroup(groupFolder: string): Promise<GroupRuntimeOperationResult> {
     return this.switchChat(groupFolder);
-  }
-
-  async switchSession(
-    _currentChatId: string,
-    sessionPath: string,
-    cwdOverride?: string,
-  ): Promise<GroupRuntimeOperationResult> {
-    const targetCwd = cwdOverride ?? getSessionHeader(sessionPath)?.cwd;
-    if (!targetCwd) {
-      throw new Error(`Cannot resolve session cwd: ${sessionPath}`);
-    }
-
-    const folder = getGroupFolderFromWorkingDirectory(targetCwd, this.rootDir);
-    if (!folder) {
-      throw new Error(`Session is outside Octo registered workspaces: ${sessionPath}`);
-    }
-
-    const workspace = this.workspaceService.getWorkspaceByFolder(folder);
-    if (!workspace) {
-      throw new Error(`Workspace not found for session cwd: ${targetCwd}`);
-    }
-
-    let chat = getChatBySessionRef(this.options.db, sessionPath);
-    if (!chat) {
-      chat = this.workspaceService.createChat(workspace.id, {
-        title: `Imported ${workspace.name}`,
-        activeBranch: workspace.default_branch,
-      });
-      updateChat(this.options.db, chat.id, {
-        sessionRef: sessionPath,
-      });
-      chat = this.workspaceService.getChatById(chat.id);
-      if (!chat) {
-        throw new Error(`Failed to materialize chat for session: ${sessionPath}`);
-      }
-    }
-
-    const managed = await this.ensureManagedRuntime(chat.id);
-    const result = await managed.runtime.switchSession(sessionPath, targetCwd);
-    if (!result.cancelled) {
-      this.persistSessionRef(managed, sessionPath);
-      this.bindSession(managed);
-    }
-
-    const snapshot = this.buildSnapshot(managed);
-    if (!result.cancelled) {
-      this.emit(chat.id, { type: "snapshot", snapshot });
-    }
-
-    return {
-      cancelled: result.cancelled,
-      group: getGroupByFolder(this.options.db, managed.workspace.folder),
-      workspace: managed.workspace,
-      chat: managed.chat,
-      runtime: managed.runtime,
-      snapshot,
-    };
   }
 
   listBranches(chatId: string): {
