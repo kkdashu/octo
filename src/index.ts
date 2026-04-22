@@ -59,14 +59,13 @@ function ensureFeishuRuntimeWorkspace() {
 
 function ensureFeishuChatBinding(chatId: string) {
   const workspace = ensureFeishuRuntimeWorkspace();
-  const isMainChat = process.env.MAIN_GROUP_CHAT_ID?.trim() === chatId;
   const chat = workspaceService.ensureFeishuChat(workspace.id, chatId, {
-    title: isMainChat ? "Main" : `Auto (${chatId})`,
+    title: `Auto (${chatId})`,
     requiresTrigger: false,
   });
 
   workspaceService.updateChat(chat.id, {
-    title: isMainChat ? "Main" : chat.title,
+    title: chat.title,
     requiresTrigger: false,
   });
 
@@ -106,22 +105,6 @@ const feishu = new FeishuChannel(
   },
 );
 channelManager.register(feishu);
-
-const appId = process.env.FEISHU_APP_ID?.trim();
-if (appId) {
-  const workspace = ensureFeishuRuntimeWorkspace();
-  const mainChatId = process.env.MAIN_GROUP_CHAT_ID?.trim();
-  if (mainChatId) {
-    const chat = workspaceService.ensureFeishuChat(workspace.id, mainChatId, {
-      title: "Main",
-      requiresTrigger: false,
-    });
-    workspaceService.updateChat(chat.id, {
-      title: "Main",
-      requiresTrigger: false,
-    });
-  }
-}
 
 const minimaxTokenPlanConfig = resolveMiniMaxTokenPlanMcpConfig();
 if (!minimaxTokenPlanConfig.apiKey) {

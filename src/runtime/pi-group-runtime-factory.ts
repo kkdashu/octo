@@ -261,7 +261,6 @@ export function createPiGroupRuntimeFactory(
           workspaceId: workspace.id,
           workspaceFolder: workspace.folder,
           chatId: chat?.id ?? "",
-          isMain: workspace.is_main === 1,
         }, options.db, sender, rootDir),
       );
 

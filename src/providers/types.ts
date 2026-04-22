@@ -16,7 +16,6 @@ export interface ConversationMessageInput {
 export interface OpenConversationInput {
   workspaceFolder: string;
   workingDirectory: string;
-  isMain: boolean;
   tools: ToolDefinition[];
   profile: ResolvedAgentProfile;
   externalMcpServers?: Record<string, ExternalMcpServerSpec>;

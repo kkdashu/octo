@@ -13,8 +13,7 @@ export function formatWorkspaceOption(
   currentWorkspaceFolder?: string,
 ): string {
   const currentMark = workspace.folder === currentWorkspaceFolder ? "* " : "  ";
-  const mainMark = workspace.is_main === 1 ? " [main]" : "";
-  return `${currentMark}${workspace.folder}  ${workspace.name}${mainMark}`;
+  return `${currentMark}${workspace.folder}  ${workspace.name}`;
 }
 
 export async function selectWorkspace(

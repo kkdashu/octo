@@ -110,7 +110,6 @@ describe("FeishuGroupAdapter concurrency", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const mainChat = workspaceService.createChat(mainWorkspace.id, {
         title: "Main",

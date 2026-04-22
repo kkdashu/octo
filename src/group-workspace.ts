@@ -9,8 +9,7 @@ import {
 import { join, resolve } from "node:path";
 import { copyDirRecursive } from "./utils";
 
-const MAIN_TEMPLATE = "groups/MAIN_AGENTS.md";
-const GROUP_TEMPLATE = "groups/GROUP_AGENTS.md";
+const WORKSPACE_TEMPLATE = "groups/WORKSPACE_AGENTS.md";
 const SYSTEM_SKILLS_DIR = "skills/system";
 
 export interface SetupGroupWorkspaceOptions {
@@ -41,7 +40,6 @@ function ensureWorkspacePiDirectories(
 
 export function ensureAgentsMd(
   folder: string,
-  isMain: boolean,
   options: SetupGroupWorkspaceOptions = {},
 ): void {
   const rootDir = options.rootDir ?? process.cwd();
@@ -50,7 +48,7 @@ export function ensureAgentsMd(
     return;
   }
 
-  const template = resolveFromRoot(rootDir, isMain ? MAIN_TEMPLATE : GROUP_TEMPLATE);
+  const template = resolveFromRoot(rootDir, WORKSPACE_TEMPLATE);
   if (!existsSync(template)) {
     return;
   }
@@ -143,13 +141,12 @@ export function ensureWorkspaceGitRepo(
 
 export function setupWorkspaceDirectory(
   folder: string,
-  isMain: boolean,
   options: SetupGroupWorkspaceOptions = {},
 ): void {
   const rootDir = options.rootDir ?? process.cwd();
   mkdirSync(resolveFromRoot(rootDir, "workspaces", folder), { recursive: true });
   ensureWorkspacePiDirectories(folder, { rootDir });
-  ensureAgentsMd(folder, isMain, { rootDir });
+  ensureAgentsMd(folder, { rootDir });
   syncSystemSkills(folder, { rootDir });
 
   if (options.initGit !== false) {
@@ -159,8 +156,7 @@ export function setupWorkspaceDirectory(
 
 export function setupGroupWorkspace(
   folder: string,
-  isMain: boolean,
   options: SetupGroupWorkspaceOptions = {},
 ): void {
-  setupWorkspaceDirectory(folder, isMain, options);
+  setupWorkspaceDirectory(folder, options);
 }

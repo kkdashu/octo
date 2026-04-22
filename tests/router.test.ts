@@ -22,7 +22,6 @@ describe("router /clear command", () => {
         name: "Main Group",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       workspaceService.createChat(workspace.id, {
         title: "Main Group",

@@ -106,7 +106,6 @@ export function initDatabase(dbPath: string): Database {
       default_branch TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
       profile_key TEXT NOT NULL,
-      is_main INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -229,7 +228,7 @@ export function initDatabase(dbPath: string): Database {
   } catch {
     // Column already exists, ignore
   }
-  migrateWorkspacesProfileKey(db);
+  migrateWorkspacesTable(db);
   migrateChatsTriggerConfig(db);
   migrateRunsTurnRequestId(db);
   dropLegacySessionsTable(db);
@@ -253,7 +252,46 @@ function getDefaultProfileKey(): string {
   return loadAgentProfilesConfig().defaultProfile;
 }
 
-function migrateWorkspacesProfileKey(db: Database): void {
+function rebuildWorkspacesTableWithoutMain(db: Database): void {
+  db.run("ALTER TABLE workspaces RENAME TO workspaces_legacy");
+  db.run(`
+    CREATE TABLE workspaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      folder TEXT NOT NULL UNIQUE,
+      default_branch TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      profile_key TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  db.run(`
+    INSERT INTO workspaces (
+      id,
+      name,
+      folder,
+      default_branch,
+      status,
+      profile_key,
+      created_at,
+      updated_at
+    )
+    SELECT
+      id,
+      name,
+      folder,
+      default_branch,
+      status,
+      profile_key,
+      created_at,
+      updated_at
+    FROM workspaces_legacy
+  `);
+  db.run("DROP TABLE workspaces_legacy");
+}
+
+function migrateWorkspacesTable(db: Database): void {
   const columns = getTableColumns(db, "workspaces");
 
   if (!columns.includes("profile_key")) {
@@ -265,8 +303,8 @@ function migrateWorkspacesProfileKey(db: Database): void {
     ).run({ profileKey: getDefaultProfileKey() });
   }
 
-  if (!columns.includes("is_main")) {
-    db.run("ALTER TABLE workspaces ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0");
+  if (columns.includes("is_main")) {
+    rebuildWorkspacesTableWithoutMain(db);
   }
 }
 
@@ -336,7 +374,6 @@ export interface WorkspaceRow {
   default_branch: string;
   status: string;
   profile_key: string;
-  is_main: number;
   created_at: string;
   updated_at: string;
 }
@@ -846,7 +883,7 @@ export function getWorkspaceByBinding(
 
 export function listWorkspaces(db: Database): WorkspaceRow[] {
   return db
-    .query("SELECT * FROM workspaces ORDER BY is_main DESC, name ASC")
+    .query("SELECT * FROM workspaces ORDER BY name ASC")
     .all() as WorkspaceRow[];
 }
 
@@ -858,7 +895,6 @@ export function createWorkspace(
     folder: string;
     defaultBranch?: string;
     profileKey?: string;
-    isMain?: boolean;
     status?: string;
   },
 ): WorkspaceRow {
@@ -872,7 +908,6 @@ export function createWorkspace(
        default_branch,
        status,
        profile_key,
-       is_main,
        created_at,
        updated_at
      ) VALUES (
@@ -882,7 +917,6 @@ export function createWorkspace(
        $defaultBranch,
        $status,
        $profileKey,
-       $isMain,
        $createdAt,
        $updatedAt
      )`,
@@ -893,7 +927,6 @@ export function createWorkspace(
     defaultBranch: workspace.defaultBranch ?? "main",
     status: workspace.status ?? "active",
     profileKey: workspace.profileKey ?? getDefaultProfileKey(),
-    isMain: workspace.isMain ? 1 : 0,
     createdAt: now,
     updatedAt: now,
   });
@@ -913,7 +946,6 @@ export function updateWorkspace(
     name?: string;
     defaultBranch?: string;
     profileKey?: string;
-    isMain?: boolean;
     status?: string;
   },
 ): void {
@@ -927,7 +959,6 @@ export function updateWorkspace(
      SET name = $name,
          default_branch = $defaultBranch,
          profile_key = $profileKey,
-         is_main = $isMain,
          status = $status,
          updated_at = $updatedAt
      WHERE id = $id`,
@@ -936,7 +967,6 @@ export function updateWorkspace(
     name: patch.name ?? current.name,
     defaultBranch: patch.defaultBranch ?? current.default_branch,
     profileKey: patch.profileKey ?? current.profile_key,
-    isMain: patch.isMain == null ? current.is_main : patch.isMain ? 1 : 0,
     status: patch.status ?? current.status,
     updatedAt: new Date().toISOString(),
   });

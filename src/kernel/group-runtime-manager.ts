@@ -537,7 +537,6 @@ export class GroupRuntimeManager implements RuntimeSnapshotController {
       chatTitle: chat.title,
       activeBranch: chat.active_branch,
       platform: bindingPlatform?.platform ?? "workspace",
-      isMain: workspace.is_main === 1,
       profileKey: workspace.profile_key,
       sessionRef: chat.session_ref,
       isStreaming: runtime?.runtime.session.isStreaming ?? false,

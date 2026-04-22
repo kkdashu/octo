@@ -3,11 +3,19 @@ import { startDesktopServer } from "../src/desktop/server";
 import type { DesktopApiRouter } from "../src/desktop/api";
 import type { DesktopAdminApiRouter } from "../src/desktop/admin-api";
 
-const servers: Array<ReturnType<typeof Bun.serve>> = [];
+type BunServeOptions = Parameters<typeof Bun.serve>[0];
+type BunServer = ReturnType<typeof Bun.serve>;
+
+const servers: BunServer[] = [];
+const restoreFns: Array<() => void> = [];
 
 afterEach(() => {
   while (servers.length > 0) {
     servers.pop()?.stop(true);
+  }
+
+  while (restoreFns.length > 0) {
+    restoreFns.pop()?.();
   }
 });
 
@@ -84,7 +92,6 @@ function createAdminApi(): DesktopAdminApiRouter {
           folder: "test-workspace",
           triggerPattern: "@octo",
           requiresTrigger: true,
-          isMain: false,
           profileKey: "claude",
           createdAt: "2026-04-19T00:00:00.000Z",
         },
@@ -119,51 +126,81 @@ function createAdminApi(): DesktopAdminApiRouter {
   };
 }
 
+function startServerWithCapturedRoutes(): {
+  routes: NonNullable<BunServeOptions["routes"]>;
+  server: BunServer;
+} {
+  const originalServe = Bun.serve;
+  let capturedOptions: BunServeOptions | null = null;
+  const bunObject = Bun as unknown as { serve: typeof Bun.serve };
+
+  bunObject.serve = ((options: BunServeOptions) => {
+    capturedOptions = options;
+    return {
+      url: new URL(`http://${options.hostname}:${options.port}`),
+      stop() {},
+    } as BunServer;
+  }) as typeof Bun.serve;
+
+  restoreFns.push(() => {
+    bunObject.serve = originalServe;
+  });
+
+  const server = startDesktopServer({
+    api: createApi(),
+    adminApi: createAdminApi(),
+    hostname: "127.0.0.1",
+    port: 4317,
+  });
+  servers.push(server);
+
+  if (!capturedOptions?.routes) {
+    throw new Error("Desktop server did not expose routes");
+  }
+
+  return {
+    routes: capturedOptions.routes,
+    server,
+  };
+}
+
 describe("desktop server", () => {
   test("adds CORS headers to API responses and supports preflight", async () => {
-    const server = startDesktopServer({
-      api: createApi(),
-      adminApi: createAdminApi(),
-      hostname: "127.0.0.1",
-      port: 0,
-    });
-    servers.push(server);
-
+    const { routes } = startServerWithCapturedRoutes();
     const origin = "http://127.0.0.1:1420";
-    const listResponse = await fetch(`${server.url}api/desktop/workspaces`, {
-      headers: {
-        Origin: origin,
-      },
-    });
+
+    const listResponse = await routes["/api/desktop/workspaces"]!.GET!(
+      new Request("http://localhost/api/desktop/workspaces", {
+        headers: { Origin: origin },
+      }),
+    );
     expect(listResponse.status).toBe(200);
     expect(listResponse.headers.get("access-control-allow-origin")).toBe(origin);
     expect(listResponse.headers.get("access-control-allow-methods")).toContain("OPTIONS");
 
-    const preflightResponse = await fetch(
-      `${server.url}api/desktop/workspaces/ws_1/chats/chat_1/prompt`,
-      {
-      method: "OPTIONS",
-      headers: {
-        Origin: origin,
-        "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "content-type",
-      },
-    },
+    const preflightResponse = await routes["/api/desktop/workspaces/:workspaceId/chats/:chatId/prompt"]!.OPTIONS!(
+      new Request("http://localhost/api/desktop/workspaces/ws_1/chats/chat_1/prompt", {
+        method: "OPTIONS",
+        headers: {
+          Origin: origin,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      }),
     );
     expect(preflightResponse.status).toBe(204);
     expect(preflightResponse.headers.get("access-control-allow-origin")).toBe(origin);
     expect(preflightResponse.headers.get("access-control-allow-headers")).toContain("Content-Type");
 
-    const adminPreflight = await fetch(
-      `${server.url}api/desktop/admin/workspaces/test-workspace`,
-      {
-      method: "OPTIONS",
-      headers: {
-        Origin: origin,
-        "Access-Control-Request-Method": "PATCH",
-        "Access-Control-Request-Headers": "content-type",
-      },
-    },
+    const adminPreflight = await routes["/api/desktop/admin/workspaces/:folder"]!.OPTIONS!(
+      new Request("http://localhost/api/desktop/admin/workspaces/test-workspace", {
+        method: "OPTIONS",
+        headers: {
+          Origin: origin,
+          "Access-Control-Request-Method": "PATCH",
+          "Access-Control-Request-Headers": "content-type",
+        },
+      }),
     );
     expect(adminPreflight.status).toBe(204);
     expect(adminPreflight.headers.get("access-control-allow-methods")).toContain("PATCH");
@@ -171,43 +208,29 @@ describe("desktop server", () => {
   });
 
   test("keeps SSE responses CORS-accessible", async () => {
-    const server = startDesktopServer({
-      api: createApi(),
-      adminApi: createAdminApi(),
-      hostname: "127.0.0.1",
-      port: 0,
-    });
-    servers.push(server);
-
+    const { routes } = startServerWithCapturedRoutes();
     const origin = "http://127.0.0.1:1420";
-    const response = await fetch(
-      `${server.url}api/desktop/workspaces/ws_1/chats/chat_1/events`,
-      {
-      headers: {
-        Origin: origin,
-      },
-    },
+
+    const response = await routes["/api/desktop/workspaces/:workspaceId/chats/:chatId/events"]!.GET!(
+      new Request("http://localhost/api/desktop/workspaces/ws_1/chats/chat_1/events", {
+        headers: { Origin: origin },
+      }),
     );
+
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(response.headers.get("access-control-allow-origin")).toBe(origin);
   });
 
   test("serves desktop admin routes with CORS headers", async () => {
-    const server = startDesktopServer({
-      api: createApi(),
-      adminApi: createAdminApi(),
-      hostname: "127.0.0.1",
-      port: 0,
-    });
-    servers.push(server);
-
+    const { routes } = startServerWithCapturedRoutes();
     const origin = "http://127.0.0.1:1420";
-    const response = await fetch(`${server.url}api/desktop/admin/workspaces`, {
-      headers: {
-        Origin: origin,
-      },
-    });
+
+    const response = await routes["/api/desktop/admin/workspaces"]!.GET!(
+      new Request("http://localhost/api/desktop/admin/workspaces", {
+        headers: { Origin: origin },
+      }),
+    );
 
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBe(origin);

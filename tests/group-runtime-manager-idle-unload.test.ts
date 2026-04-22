@@ -63,7 +63,6 @@ describe("GroupRuntimeManager idle unload", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",
@@ -117,7 +116,6 @@ describe("GroupRuntimeManager idle unload", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",

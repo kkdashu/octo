@@ -19,7 +19,6 @@ function createSummary(
     folder: "main",
     name: "Main Group",
     channelType: "cli",
-    isMain: true,
     profileKey: "claude",
     sessionRef: "/tmp/main.jsonl",
     isStreaming: false,
@@ -137,7 +136,6 @@ describe("desktop runtime state", () => {
       group: createSummary({
         folder: "cli_20260418_test",
         name: "New Desktop Group",
-        isMain: false,
         sessionRef: null,
       }),
       snapshot: createSnapshot({

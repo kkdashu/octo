@@ -37,7 +37,6 @@ export interface CreateWorkspaceOptions {
   folder: string;
   defaultBranch?: string;
   profileKey?: string;
-  isMain?: boolean;
 }
 
 export interface CreateChatOptions {
@@ -115,7 +114,7 @@ export class WorkspaceService {
   }
 
   ensureWorkspaceDirectory(workspace: WorkspaceRow): void {
-    setupWorkspaceDirectory(workspace.folder, workspace.is_main === 1, {
+    setupWorkspaceDirectory(workspace.folder, {
       rootDir: this.rootDir,
     });
   }
@@ -126,7 +125,6 @@ export class WorkspaceService {
       folder: options.folder,
       defaultBranch: options.defaultBranch ?? "main",
       profileKey: options.profileKey ?? getDefaultProfileKey(),
-      isMain: options.isMain ?? false,
     });
     this.ensureWorkspaceDirectory(workspace);
     upsertWorkspaceBinding(this.db, {
@@ -201,14 +199,11 @@ export class WorkspaceService {
     workspace: WorkspaceRow;
     chat: ChatRow;
   } {
-    const existing = this.listWorkspaces();
-    const isMain = !existing.some((workspace) => workspace.is_main === 1);
     const folder = generateCliWorkspaceFolder(this.now());
     const workspace = this.createWorkspace({
       name: options.name?.trim() || `CLI ${folder}`,
       folder,
       profileKey: options.profileKey?.trim() || getDefaultProfileKey(),
-      isMain,
     });
     const chat = this.createChat(workspace.id, {
       title: workspace.name,
@@ -243,7 +238,6 @@ export class WorkspaceService {
       name: options?.name?.trim() || `Feishu ${appId}`,
       folder: `feishu_${appId}`,
       profileKey: options?.profileKey?.trim() || getDefaultProfileKey(),
-      isMain: this.listWorkspaces().length === 0,
     });
     upsertWorkspaceBinding(this.db, {
       workspaceId: workspace.id,

@@ -13,7 +13,6 @@ export interface DesktopAdminWorkspaceDto {
   folder: string;
   triggerPattern: string;
   requiresTrigger: boolean;
-  isMain: boolean;
   profileKey: string;
   createdAt: string;
 }

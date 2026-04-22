@@ -39,7 +39,6 @@ function createWorkspace() {
     name: "Desktop Group",
     folder: "desktop-group",
     profileKey: "claude",
-    isMain: false,
   });
   workspaceService.createChat(workspace.id, {
     title: "Desktop Group",

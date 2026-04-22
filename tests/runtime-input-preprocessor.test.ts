@@ -18,7 +18,6 @@ describe("runtime input preprocessor", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",

@@ -53,7 +53,6 @@ describe("reset workspace chat state script", () => {
            default_branch,
            status,
            profile_key,
-           is_main,
            created_at,
            updated_at
          ) VALUES (
@@ -63,7 +62,6 @@ describe("reset workspace chat state script", () => {
            'main',
            'active',
            'claude',
-           1,
            '2026-04-21T00:00:00.000Z',
            '2026-04-21T00:00:00.000Z'
          )`,

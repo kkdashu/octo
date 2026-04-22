@@ -54,7 +54,6 @@ function createFixture() {
     folder: "test-workspace",
     defaultBranch: "main",
     profileKey: "claude",
-    isMain: false,
   });
   createChat(db, {
     workspaceId: workspace.id,

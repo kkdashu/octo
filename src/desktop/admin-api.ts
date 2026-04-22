@@ -129,7 +129,6 @@ function mapWorkspaceRow(db: Database, folder: string): DesktopAdminWorkspaceDto
     folder: workspace.folder,
     triggerPattern: chat?.trigger_pattern ?? "",
     requiresTrigger: chat?.requires_trigger === 1,
-    isMain: workspace.is_main === 1,
     profileKey: workspace.profile_key,
     createdAt: workspace.created_at,
   };
@@ -151,13 +150,7 @@ function toDesktopAdminWorkspaceMemoryDto(
 function buildWorkspaceListResponse(db: Database): DesktopAdminWorkspaceListResponse {
   const workspaces = listWorkspaces(db)
     .map((workspace) => mapWorkspaceRow(db, workspace.folder))
-    .sort((a, b) => {
-      if (a.isMain !== b.isMain) {
-        return a.isMain ? -1 : 1;
-      }
-
-      return a.name.localeCompare(b.name, "zh-Hans-CN");
-    });
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
 
   return {
     workspaces,

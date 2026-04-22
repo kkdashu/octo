@@ -138,7 +138,6 @@ describe("turn request integration", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",
@@ -246,7 +245,6 @@ describe("turn request integration", () => {
         default_branch: "main",
         status: "active",
         profile_key: "claude",
-        is_main: 0,
         created_at: "2026-04-21T00:00:00.000Z",
         updated_at: "2026-04-21T00:00:00.000Z",
       } satisfies WorkspaceRow;
@@ -309,7 +307,6 @@ describe("turn request integration", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",
@@ -384,7 +381,6 @@ describe("turn request integration", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const firstChat = workspaceService.createChat(workspace.id, {
         title: "First",
@@ -476,7 +472,6 @@ describe("turn request integration", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",

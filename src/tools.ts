@@ -8,16 +8,13 @@ import {
   deleteWorkspaceMemory,
   getWorkspaceByFolder,
   listChatBindingsForChat,
-  listChatsForWorkspace,
   listTasks,
   listWorkspaceMemories,
-  listWorkspaces,
   isSupportedWorkspaceMemoryKey,
   type WorkspaceMemoryKeyType,
   type WorkspaceMemoryRow,
   upsertWorkspaceMemory,
   updateTaskStatus,
-  updateWorkspace,
   validateWorkspaceMemoryKey,
 } from "./db";
 import { getWorkspaceDirectory } from "./group-workspace";
@@ -28,7 +25,6 @@ import {
   MINIMAX_IMAGE_ASPECT_RATIOS,
   MINIMAX_IMAGE_MODELS,
 } from "./runtime/minimax-image";
-import { listAgentProfiles, loadAgentProfilesConfig } from "./runtime/profile-config";
 import { computeNextRun } from "./task-scheduler";
 import { copyDirRecursive } from "./utils";
 
@@ -56,19 +52,10 @@ export interface WorkspaceToolContext {
   workspaceId: string;
   workspaceFolder: string;
   chatId: string;
-  isMain: boolean;
 }
 
-type ResolveTargetExternalChatIdResult =
-  | { ok: true; externalChatId: string }
-  | { ok: false; message: string };
-
-type ResolveTargetWorkspaceResult =
-  | {
-      ok: true;
-      workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>;
-      chatId: string;
-    }
+type ResolveCurrentWorkspaceResult =
+  | { ok: true; workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>> }
   | { ok: false; message: string };
 
 const BUILTIN_WORKSPACE_MEMORY_LABELS: Record<string, string> = {
@@ -86,11 +73,10 @@ function getPrimaryExternalChatId(
   return binding?.external_chat_id ?? null;
 }
 
-function resolveTargetExternalChatId(
+function resolveCurrentExternalChatId(
   db: Database,
   context: WorkspaceToolContext,
-  requestedExternalChatId: unknown,
-): ResolveTargetExternalChatIdResult {
+): { ok: true; externalChatId: string } | { ok: false; message: string } {
   const currentExternalChatId = getPrimaryExternalChatId(db, context.chatId);
   if (!currentExternalChatId) {
     return {
@@ -99,71 +85,24 @@ function resolveTargetExternalChatId(
     };
   }
 
-  const normalizedRequested =
-    typeof requestedExternalChatId === "string" ? requestedExternalChatId.trim() : "";
-  const targetExternalChatId = normalizedRequested || currentExternalChatId;
-
-  if (!context.isMain && targetExternalChatId !== currentExternalChatId) {
-    return {
-      ok: false,
-      message: "Permission denied: cannot send to other chats",
-    };
-  }
-
   return {
     ok: true,
-    externalChatId: targetExternalChatId,
+    externalChatId: currentExternalChatId,
   };
 }
 
-function getDefaultWorkspaceChatId(
-  db: Database,
-  workspaceId: string,
-): string | null {
-  return listChatsForWorkspace(db, workspaceId)[0]?.id ?? null;
-}
-
-function resolveTargetWorkspace(
+function resolveCurrentWorkspace(
   db: Database,
   context: WorkspaceToolContext,
-  requestedTargetWorkspaceFolder: unknown,
-): ResolveTargetWorkspaceResult {
+): ResolveCurrentWorkspaceResult {
   const currentWorkspace = getWorkspaceByFolder(db, context.workspaceFolder);
   if (!currentWorkspace) {
     return { ok: false, message: `Workspace not found: ${context.workspaceFolder}` };
   }
 
-  const normalizedRequested =
-    typeof requestedTargetWorkspaceFolder === "string"
-      ? requestedTargetWorkspaceFolder.trim()
-      : "";
-  const targetWorkspace = normalizedRequested
-    ? getWorkspaceByFolder(db, normalizedRequested)
-    : currentWorkspace;
-
-  if (!targetWorkspace) {
-    return { ok: false, message: `Workspace not found: ${normalizedRequested}` };
-  }
-
-  if (!context.isMain && targetWorkspace.id !== currentWorkspace.id) {
-    return {
-      ok: false,
-      message: "Permission denied: cannot target another workspace",
-    };
-  }
-
-  const defaultChatId = getDefaultWorkspaceChatId(db, targetWorkspace.id);
-  if (!defaultChatId) {
-    return {
-      ok: false,
-      message: `Workspace has no chat: ${targetWorkspace.folder}`,
-    };
-  }
-
   return {
     ok: true,
-    workspace: targetWorkspace,
-    chatId: defaultChatId,
+    workspace: currentWorkspace,
   };
 }
 
@@ -171,40 +110,6 @@ function formatWorkspaceLabel(
   workspace: NonNullable<ReturnType<typeof getWorkspaceByFolder>>,
 ): string {
   return `"${workspace.name}" (${workspace.folder})`;
-}
-
-async function handleClearSessionTool(
-  db: Database,
-  sender: MessageSender,
-  targetWorkspaceFolder: string,
-  toolName: string,
-) {
-  const targetWorkspace = getWorkspaceByFolder(db, targetWorkspaceFolder);
-  if (!targetWorkspace) {
-    return textResult(`Workspace not found: ${targetWorkspaceFolder}`);
-  }
-
-  const targetChatId = getDefaultWorkspaceChatId(db, targetWorkspace.id);
-  if (!targetChatId) {
-    return textResult(`Workspace has no chat: ${targetWorkspaceFolder}`);
-  }
-
-  if (!sender.clearSession) {
-    log.error(TAG, `[${toolName}] clearSession not available in sender`);
-    return textResult("Clear session not supported");
-  }
-
-  const result = await sender.clearSession(targetChatId);
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: result.closedActiveSession
-          ? `Session cleared for workspace ${formatWorkspaceLabel(targetWorkspace)}. A fresh AI session (${result.sessionRef}) is ready, and the previous active session was closed.`
-          : `Session cleared for workspace ${formatWorkspaceLabel(targetWorkspace)}. A fresh AI session (${result.sessionRef}) is ready for the next message.`,
-      },
-    ],
-  };
 }
 
 function formatWorkspaceMemoryList(
@@ -244,22 +149,16 @@ export function createWorkspaceToolDefs(
   projectRoot?: string,
 ): ToolDefinition[] {
   const root = projectRoot ?? ".";
-  log.info(TAG, `Creating tool definitions for workspace: ${context.workspaceFolder}`, {
-    isMain: context.isMain,
-  });
+  log.info(TAG, `Creating tool definitions for workspace: ${context.workspaceFolder}`);
 
   const commonTools: ToolDefinition[] = [
     {
       name: "send_message",
       description:
-        "Send a message to a chat. Supports plain text, local Markdown images like ![alt](path.png), and local Markdown file links like [report.pdf](./report.pdf).",
+        "Send a message to the current chat. Supports plain text, local Markdown images like ![alt](path.png), and local Markdown file links like [report.pdf](./report.pdf).",
       schema: {
         type: "object",
         properties: {
-          externalChatId: {
-            type: "string",
-            description: "Optional target external chat ID. Omit to reply to the current chat.",
-          },
           text: {
             type: "string",
             description:
@@ -269,11 +168,7 @@ export function createWorkspaceToolDefs(
         required: ["text"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetExternalChatId(
-          db,
-          context,
-          args.externalChatId,
-        );
+        const resolvedTarget = resolveCurrentExternalChatId(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -284,14 +179,10 @@ export function createWorkspaceToolDefs(
     },
     {
       name: "send_image",
-      description: "Send an image file to a chat",
+      description: "Send an image file to the current chat",
       schema: {
         type: "object",
         properties: {
-          externalChatId: {
-            type: "string",
-            description: "Optional target external chat ID. Omit to reply to the current chat.",
-          },
           filePath: {
             type: "string",
             description: "Image file path, relative to the current workspace directory",
@@ -300,11 +191,7 @@ export function createWorkspaceToolDefs(
         required: ["filePath"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetExternalChatId(
-          db,
-          context,
-          args.externalChatId,
-        );
+        const resolvedTarget = resolveCurrentExternalChatId(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -494,19 +381,11 @@ export function createWorkspaceToolDefs(
             enum: ["builtin", "custom"],
             default: "builtin",
           },
-          targetWorkspaceFolder: {
-            type: "string",
-            description: "Optional target workspace folder. Main workspace only.",
-          },
         },
         required: ["key", "value"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetWorkspace(
-          db,
-          context,
-          args.targetWorkspaceFolder,
-        );
+        const resolvedTarget = resolveCurrentWorkspace(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -550,22 +429,9 @@ export function createWorkspaceToolDefs(
     {
       name: "list_workspace_memory",
       description: "List long-term workspace memory.",
-      schema: {
-        type: "object",
-        properties: {
-          targetWorkspaceFolder: {
-            type: "string",
-            description: "Optional target workspace folder. Main workspace only.",
-          },
-        },
-        required: [],
-      },
-      handler: async (args) => {
-        const resolvedTarget = resolveTargetWorkspace(
-          db,
-          context,
-          args.targetWorkspaceFolder,
-        );
+      schema: { type: "object", properties: {}, required: [] },
+      handler: async () => {
+        const resolvedTarget = resolveCurrentWorkspace(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -588,19 +454,11 @@ export function createWorkspaceToolDefs(
         type: "object",
         properties: {
           key: { type: "string", description: "Memory key to delete" },
-          targetWorkspaceFolder: {
-            type: "string",
-            description: "Optional target workspace folder. Main workspace only.",
-          },
         },
         required: ["key"],
       },
       handler: async (args) => {
-        const resolvedTarget = resolveTargetWorkspace(
-          db,
-          context,
-          args.targetWorkspaceFolder,
-        );
+        const resolvedTarget = resolveCurrentWorkspace(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -637,22 +495,9 @@ export function createWorkspaceToolDefs(
     {
       name: "clear_workspace_memory",
       description: "Clear all long-term memory for a workspace.",
-      schema: {
-        type: "object",
-        properties: {
-          targetWorkspaceFolder: {
-            type: "string",
-            description: "Optional target workspace folder. Main workspace only.",
-          },
-        },
-        required: [],
-      },
-      handler: async (args) => {
-        const resolvedTarget = resolveTargetWorkspace(
-          db,
-          context,
-          args.targetWorkspaceFolder,
-        );
+      schema: { type: "object", properties: {}, required: [] },
+      handler: async () => {
+        const resolvedTarget = resolveCurrentWorkspace(db, context);
         if (resolvedTarget.ok === false) {
           return textResult(resolvedTarget.message);
         }
@@ -745,167 +590,8 @@ export function createWorkspaceToolDefs(
       },
     },
   ];
-
-  const mainOnlyTools: ToolDefinition[] = context.isMain
-    ? [
-        {
-          name: "list_workspaces",
-          description: "List all workspaces",
-          schema: { type: "object", properties: {}, required: [] },
-          handler: async () => {
-            return textResult(JSON.stringify(listWorkspaces(db), null, 2));
-          },
-        },
-        {
-          name: "refresh_chats",
-          description: "Refresh chat metadata from all channels",
-          schema: { type: "object", properties: {}, required: [] },
-          handler: async () => {
-            const result = await sender.refreshChatMetadata();
-            return textResult(`Refreshed: ${result.count} chats found`);
-          },
-        },
-        {
-          name: "schedule_workspace_task",
-          description: "Create a scheduled task for another workspace",
-          schema: {
-            type: "object",
-            properties: {
-              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
-              prompt: { type: "string", description: "Task prompt" },
-              scheduleType: { type: "string", enum: ["cron"] },
-              scheduleValue: { type: "string", description: "Cron expression" },
-              contextMode: { type: "string", enum: ["workspace", "isolated"], default: "isolated" },
-            },
-            required: ["targetWorkspaceFolder", "prompt", "scheduleType", "scheduleValue"],
-          },
-          handler: async (args) => {
-            const resolvedTarget = resolveTargetWorkspace(
-              db,
-              context,
-              args.targetWorkspaceFolder,
-            );
-            if (resolvedTarget.ok === false) {
-              return textResult(resolvedTarget.message);
-            }
-
-            let nextRun: string | null = null;
-            try {
-              nextRun = computeNextRun(args.scheduleValue as string);
-            } catch {
-              return textResult(`Invalid cron expression: ${args.scheduleValue}`);
-            }
-
-            const id = createTask(db, {
-              workspaceId: resolvedTarget.workspace.id,
-              chatId: resolvedTarget.chatId,
-              prompt: args.prompt as string,
-              scheduleType: args.scheduleType as string,
-              scheduleValue: args.scheduleValue as string,
-              contextMode: (args.contextMode as string) ?? "isolated",
-              nextRun: nextRun ?? undefined,
-            });
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Task created for ${resolvedTarget.workspace.folder}: ${id}, next run: ${nextRun}`,
-                },
-              ],
-            };
-          },
-        },
-        {
-          name: "list_profiles",
-          description: "List all configured agent profiles with model and upstream details",
-          schema: { type: "object", properties: {}, required: [] },
-          handler: async () => {
-            const config = loadAgentProfilesConfig();
-            const profiles = listAgentProfiles();
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: JSON.stringify(
-                    {
-                      defaultProfile: config.defaultProfile,
-                      profiles,
-                    },
-                    null,
-                    2,
-                  ),
-                },
-              ],
-            };
-          },
-        },
-        {
-          name: "switch_profile",
-          description: "Switch the agent profile for a workspace. Use list_profiles to see available profile keys.",
-          schema: {
-            type: "object",
-            properties: {
-              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
-              profileKey: { type: "string", description: "Profile key" },
-            },
-            required: ["targetWorkspaceFolder", "profileKey"],
-          },
-          handler: async (args) => {
-            const folder = args.targetWorkspaceFolder as string;
-            const profileKey = args.profileKey as string;
-            const targetWorkspace = getWorkspaceByFolder(db, folder);
-            if (!targetWorkspace) {
-              return textResult(`Workspace not found: ${folder}`);
-            }
-
-            const config = loadAgentProfilesConfig();
-            if (!config.profiles[profileKey]) {
-              const available = Object.keys(config.profiles).sort().join(", ");
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `Unknown profile: ${profileKey}. Available profiles: ${available}`,
-                  },
-                ],
-              };
-            }
-
-            updateWorkspace(db, targetWorkspace.id, { profileKey });
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Workspace "${targetWorkspace.name}" (${folder}) switched to profile: ${profileKey}`,
-                },
-              ],
-            };
-          },
-        },
-        {
-          name: "clear_session",
-          description: "Clear only the AI session for a target workspace.",
-          schema: {
-            type: "object",
-            properties: {
-              targetWorkspaceFolder: { type: "string", description: "Target workspace folder name" },
-            },
-            required: ["targetWorkspaceFolder"],
-          },
-          handler: async (args) =>
-            handleClearSessionTool(
-              db,
-              sender,
-              args.targetWorkspaceFolder as string,
-              "clear_session",
-            ),
-        },
-      ]
-    : [];
-
-  const allTools = [...commonTools, ...mainOnlyTools];
-  log.info(TAG, `Tool definitions created for workspace ${context.workspaceFolder}: ${allTools.length} tools`);
-  return allTools;
+  log.info(TAG, `Tool definitions created for workspace ${context.workspaceFolder}: ${commonTools.length} tools`);
+  return commonTools;
 }
 
 export function getToolNames(tools: ToolDefinition[], mcpServerName: string): string[] {

@@ -33,7 +33,6 @@ function createWorkspace() {
     name: "Main Group",
     folder: "main",
     profileKey: "minimax-cn",
-    isMain: true,
   });
   workspaceService.createChat(workspace.id, {
     title: "Main Group",

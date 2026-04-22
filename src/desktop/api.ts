@@ -239,7 +239,6 @@ export function createDesktopApiRouter(
         folder: workspace.folder,
         defaultBranch: workspace.default_branch,
         profileKey: workspace.profile_key,
-        isMain: workspace.is_main === 1,
         chats: workspaceService.listChats(workspace.id).map((chat) => {
           const summary = summaryByChatId.get(chat.id);
           return {

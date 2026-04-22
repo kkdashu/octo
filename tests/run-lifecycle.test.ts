@@ -32,7 +32,6 @@ describe("run lifecycle helpers", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",
@@ -101,7 +100,6 @@ describe("run lifecycle helpers", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",
@@ -144,7 +142,6 @@ describe("run lifecycle helpers", () => {
         name: "Main",
         folder: "main",
         profileKey: "claude",
-        isMain: true,
       });
       const chat = workspaceService.createChat(workspace.id, {
         title: "Main",

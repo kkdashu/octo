@@ -74,7 +74,7 @@ When replying to the current chat, omit `chatJid`.
 | `mcp__octo-tools__schedule_task` | Create a scheduled task for the current workspace |
 | `mcp__octo-tools__list_tasks` | List scheduled tasks for the current workspace |
 | `mcp__octo-tools__pause_task` | Pause a scheduled task |
-| `mcp__octo-tools__resume_task` | Resume a scheduled task |
+| `mcp__octo-tools__resume_task` | Resume a paused task |
 | `mcp__octo-tools__cancel_task` | Cancel a scheduled task |
 | `mcp__octo-tools__remember_workspace_memory` | Create or update long-term workspace memory |
 | `mcp__octo-tools__list_workspace_memory` | List long-term workspace memory |

@@ -28,7 +28,6 @@ function bindTestChat(
     folder,
     defaultBranch: "main",
     profileKey: "claude",
-    isMain: false,
   });
   const chat = createChat(db, {
     workspaceId: workspace.id,

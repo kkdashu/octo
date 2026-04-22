@@ -56,7 +56,6 @@ function createSummary(
     chatTitle: "Main Chat",
     activeBranch: "main",
     platform: "cli",
-    isMain: true,
     profileKey: "claude",
     sessionRef: "/tmp/session.jsonl",
     isStreaming: false,
@@ -106,7 +105,6 @@ function createFixture(): {
     folder: "main",
     defaultBranch: "main",
     profileKey: "claude",
-    isMain: true,
   });
   const chat = workspaceService.createChat(workspace.id, {
     title: "Main Chat",
@@ -159,7 +157,6 @@ describe("desktop api router", () => {
         chatId: fixture.chat.id,
         chatTitle: fixture.chat.title,
         activeBranch: fixture.chat.active_branch,
-        isMain: fixture.workspace.is_main === 1,
         profileKey: fixture.workspace.profile_key,
         sessionRef: fixture.chat.session_ref,
       }),
@@ -222,7 +219,6 @@ describe("desktop api router", () => {
           folder: "main",
           defaultBranch: "main",
           profileKey: "claude",
-          isMain: true,
           chats: [
             {
               id: fixture.chat.id,
@@ -445,7 +441,6 @@ describe("desktop api router", () => {
         default_branch: "main",
         status: "active",
         profile_key: "claude",
-        is_main: 0,
         created_at: "2026-04-22T00:00:00.000Z",
         updated_at: "2026-04-22T00:00:00.000Z",
       },
@@ -468,7 +463,6 @@ describe("desktop api router", () => {
         workspaceName: "New Desktop Workspace",
         chatId: "chat_cli_test",
         chatTitle: "New Desktop Workspace",
-        isMain: false,
         sessionRef: null,
       }),
       snapshot: createSnapshot({

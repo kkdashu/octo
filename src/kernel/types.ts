@@ -65,7 +65,6 @@ export interface RuntimeSummary {
   chatTitle: string;
   activeBranch: string;
   platform: string;
-  isMain: boolean;
   profileKey: string;
   sessionRef: string | null;
   isStreaming: boolean;
